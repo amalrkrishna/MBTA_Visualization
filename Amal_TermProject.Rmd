@@ -1,0 +1,2372 @@
+---
+title: "MBTA Data Visualization"
+output: html_document
+---
+
+```{r results='asis', echo=FALSE, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE)
+
+```
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+This Html can be accessed from <http://amalrkrishna.com/>.
+
+## Why the MBTA Data?
+
+1. The Subway has been a part of my daily commute in Boston and I find it interesting to understand and work with data that directly affects me.
+2. The MBTA relatime API calls and the subsequent JSON Data it generates is rich and extensive.
+3. APIV3 was released just a week before which shows the constant data driven efforts undertaken within the MBTA, this helps me to extend this Term Project from an Analysis perspective to Real time Predictive Analytics at a later point.
+4. (Aim high and miss > Aim low and hit)
+
+
+### About the MBTA Data
+1. Few basic datasets downloaded from the MBTA website in csv format. This gives an overview of the Ridership, Finance and Customer Satisfaction within the MBTA.
+2. The major chunk of the data is extracted through the realtime APIV2 and APIV3 calls provided by the MBTA. This returns JSON format data sets, which are later converted into dataframes where necessary.
+3. All the larger datasets are saved as .rds files for easy 2nd time acess.
+4. Sampling methods are implemented on a subset of data.
+5. API Documentation: https://www.mbta.com/developers
+6. Similar Javascript based MBTA Visualization :  http://mbtaviz.github.io/
+                                                  http://mbtaviz.github.io/green-line-release/
+  
+
+### Load the required libraries
+```{r, message=F}
+library(sampling) #for sampling functions
+library(data.table)
+library(jsonlite) #reading json data
+library(dplyr) #data manipulation
+library(tidyr) #data manipulation
+library(lubridate) #days() and hours()
+library(readr)
+library(UsingR)
+library(plotly) #plotting 
+library(gepaf) #for converting polyline encoding into geographical coords
+library(leaflet) #maps
+library(knitr) #printing dataframes
+library(kableExtra) #printing dataframes
+```
+
+### Initializing the APIV3 and APIV2 Keys
+```{r, message=F}
+TKeyAPIV3 <- "?api_key=29655b2934ca4235add916cb22e9b9f2"
+TKeyAPIV2 <- "?api_key=DOb5b6UKM0uecKLrPskA7A"
+```
+
+### Define all the API call URLs
+```{r}
+#APIV3URLS
+TRoutesURL3 <- "https://api-v3.mbta.com/routes"
+TStopsURL3 <- "https://api-v3.mbta.com/stops"
+TVehiclesURL3 <- "https://api-v3.mbta.com/vehicles"
+TShapesURL3 <- "https://api-v3.mbta.com/shapes?route="
+TSchedulesURL3 <- "https://api-v3.mbta.com/schedules?route="
+TPredictionsURL3 <- "https://api-v3.mbta.com/predictions?route="
+
+#APIV2 URLS
+TRouteURL2 <- "http://realtime.mbta.com/developer/api/v2/stopsbyroute"
+TTravelURL2 <- "http://realtime.mbta.com/developer/api/v2.1/traveltimes"
+THeadwaysURL2 <- "http://realtime.mbta.com/developer/api/v2.1/headways"
+TDwellsURL2 <- "http://realtime.mbta.com/developer/api/v2.1/dwells"
+TFormat <- "&format=json"
+```
+
+### Read Data from CSV
+This is the basic dataset directly downloaded from http://www.mbtabackontrack.com/performance/index.html#/download
+```{r}
+RidData<-data.frame(read.csv("TDashboardData_ridership.csv"))
+```
+
+```{r echo=FALSE, results='asis'}
+#TDashboardData_ridership.csv
+kable(head(RidData), "html") %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed") ,font_size = 8)
+```
+
+```{r}
+CSData<-data.frame(read.csv("TDashboardData_customersatisfaction.csv"))
+```
+
+```{r echo=FALSE, results='asis'}
+#TDashboardData_customersatisfaction.csv
+kable(head(CSData)[,c(1:5)], "html") %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed") ,font_size = 8)
+```
+
+```{r}
+FData<-data.frame(read.csv("TDashboardData_financials.csv"))
+```
+
+```{r echo=FALSE, results='asis'}
+#TDashboardData_financials.csv
+kable(head(FData), "html") %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed") ,font_size = 8)
+```
+
+### Ridership in the MBTA with customer satisfaction along with expenses and revenue
+```{r}
+
+RidershipRevExp <- plot_ly() %>%
+  add_bars(x=format(as.Date(unique(RidData$SERVICE_MONTH)), "%y-%m"), 
+    y = aggregate(TOTAL_WEEKDAY_RIDERSHIP_COUNT ~ SERVICE_MONTH, RidData, sum)$TOTAL_WEEKDAY_RIDERSHIP_COUNT,name = "Ridership",yaxis="y1") %>%
+  add_bars(x=format(as.Date(unique(FData$Reporting.Date)), "%y-%m"), y = aggregate(Month.to.Date.Actual.Amount ~ Reporting.Date, subset(FData,Category=="Expenses"), sum)$Month.to.Date.Actual.Amount,name = "Expense",yaxis="y2") %>%
+  add_bars(x=format(as.Date(unique(FData$Reporting.Date)), "%y-%m"), y = aggregate(Month.to.Date.Actual.Amount ~ Reporting.Date, subset(FData,Category=="Revenue"), sum)$Month.to.Date.Actual.Amount, name = "Revenue",yaxis="y2") %>%
+   add_trace(x=format(as.Date(unique(CSData$Survey.Date)), "%y-%m"),y=aggregate(Average.Rating.Out.of.7 ~ Survey.Date, CSData, mean)$Average.Rating.Out.of.7, name = "Customer Satisfaction", type="scatter", mode="lines",yaxis="y3")  %>%
+  subplot(nrows = 3, shareX = TRUE)
+
+```
+
+<br>
+```{r echo=FALSE, fig.align = "center", fig.width=10}
+RidershipRevExp
+```
+
+The Ridership stays high during March to October and usually decreases during the winter (December - April) <br>
+The gap between the expense and the revenue has been closing down in 2017 unlike 2 years back.
+
+### Geting all the MBTA Routes details by APIV3 call
+```{r}
+RoutesComplete<-fromJSON(paste(TRoutesURL3))$data
+#[1:8] pickout only the subway list
+RoutesList<-unique(subset(RoutesComplete, RoutesComplete$attributes$description == "Rapid Transit")$id)[1:8] 
+```
+
+Routes data (RoutesComplete)
+```{r echo=FALSE}
+kable(head(flatten(RoutesComplete)), "html") %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed") ,font_size = 8)
+```
+
+### Ridership by mode of transport, Number of routes by type and total weekday ridership
+```{r}
+RidershipByMode<-aggregate(TOTAL_WEEKDAY_RIDERSHIP_COUNT ~ MODE_TYPE,RidData,sum)
+
+RidershipByModePie <- plot_ly(RidershipByMode, labels = ~MODE_TYPE, values = ~TOTAL_WEEKDAY_RIDERSHIP_COUNT, type = 'pie',textposition = 'inside', textinfo = 'label+percent') %>%
+  layout(title = 'Total ridership by mode of transport', showlegend = FALSE)
+
+RidershipByRoute<-aggregate(TOTAL_WEEKDAY_RIDERSHIP_COUNT ~ ROUTE_OR_LINE ,RidData,mean)
+
+RidershipByRouteBar <- plot_ly(RidershipByRoute, x = ~ROUTE_OR_LINE, y = ~TOTAL_WEEKDAY_RIDERSHIP_COUNT, lables = ~ROUTE_OR_LINE, color = ~ROUTE_OR_LINE, type = 'bar') %>%
+  layout(title = 'Total weekday ridership in a month', yaxis=list(title='Ridership'), xaxis=list(title=''), showlegend = FALSE, margin=list(b=100))
+
+NumOfRoutesByType <- plot_ly(
+  x = names(table(RoutesComplete$attributes$description)),
+  y = as.numeric(table(RoutesComplete$attributes$description)),
+  type = "bar", color=names(table(RoutesComplete$attributes$description))) %>%
+  layout(title = 'Number of routes in the MBTA', yaxis = list(title = "Frequency"), margin=list(b=75))
+```
+<br>
+<div class="col2">
+```{r echo=FALSE, fig.width=4}
+RidershipByModePie
+```
+
+```{r echo=FALSE, fig.width=4}
+RidershipByRouteBar
+```
+</div>
+<br>
+```{r echo=FALSE, fig.align="center", fig.width=8}
+NumOfRoutesByType
+```
+<br>
+
+
+### Complete Schedules with APIV3
+```{r}
+if(file.exists("SchedulesComplete.rds")) {
+  SchedulesComplete <- readRDS("SchedulesComplete.rds")
+} else {
+  SchedulesComplete <- data.frame(Date=as.Date(character()),
+                                  File=character(), 
+                                  User=character(), 
+                                  stringsAsFactors=FALSE) 
+  for(i in RoutesList) {
+    SchedulesComplete<-rbind(SchedulesComplete, data.frame(fromJSON(paste(TSchedulesURL3,i,sep=""), flatten = TRUE)))
+  }
+  saveRDS(SchedulesComplete, "SchedulesComplete.rds")
+}
+```
+
+Schedule data (SchedulesComplete)
+```{r echo=FALSE}
+head(SchedulesComplete)
+```
+
+### Number of Scheduled Trips by Subway Lines
+```{r}
+NumOfTripsByType <- plot_ly(x = names(table(SchedulesComplete$data.relationships.route.data.id)), y = as.numeric(table(SchedulesComplete$data.relationships.route.data.id)), type = "bar", color = names(table(SchedulesComplete$data.relationships.route.data.id))) %>%
+  layout(title = "Number of Scheduled Trips in a day (Saturday)", yaxis = list(title = "Frequency"))
+```
+<br>
+```{r echo=FALSE, fig.align="center", fig.width=8}
+NumOfTripsByType
+```
+
+### Generating routes and route pairs of each subway line by APIV2
+Code available in RMarkdown source
+```{r echo=FALSE}
+RedLineRoute <- fromJSON(paste(TRouteURL2, TKeyAPIV2, TFormat, "&route=Red", sep=""))[[1]]
+MattapanLineRoute <- fromJSON(paste(TRouteURL2, TKeyAPIV2, TFormat, "&route=Mattapan", sep=""))[[1]]
+GreenBLineRoute <- fromJSON(paste(TRouteURL2, TKeyAPIV2, TFormat, "&route=Green-B", sep=""))[[1]]
+GreenCLineRoute <- fromJSON(paste(TRouteURL2, TKeyAPIV2, TFormat, "&route=Green-C", sep=""))[[1]]
+GreenDLineRoute <- fromJSON(paste(TRouteURL2, TKeyAPIV2, TFormat, "&route=Green-D", sep=""))[[1]]
+GreenELineRoute <- fromJSON(paste(TRouteURL2, TKeyAPIV2, TFormat, "&route=Green-E", sep=""))[[1]]
+BlueLineRoute <- fromJSON(paste(TRouteURL2, TKeyAPIV2, TFormat, "&route=Blue", sep=""))[[1]]
+OrangeLineRoute <- fromJSON(paste(TRouteURL2, TKeyAPIV2, TFormat, "&route=Orange", sep=""))[[1]]
+
+RedLineRoute1<-subset(RedLineRoute$stop[[1]],70000<as.numeric(RedLineRoute$stop[[1]]$stop_id)&as.numeric(RedLineRoute$stop[[1]]$stop_id)<75000)
+GreenBLineRoute1<-subset(GreenBLineRoute$stop[[1]],70000<as.numeric(GreenBLineRoute$stop[[1]]$stop_id)&as.numeric(GreenBLineRoute$stop[[1]]$stop_id)<75000)
+GreenCLineRoute1<-subset(GreenCLineRoute$stop[[1]],70000<as.numeric(GreenCLineRoute$stop[[1]]$stop_id)&as.numeric(GreenCLineRoute $stop[[1]]$stop_id)<75000)
+GreenDLineRoute1<-subset(GreenDLineRoute$stop[[1]],70000<as.numeric(GreenDLineRoute$stop[[1]]$stop_id)&as.numeric(GreenDLineRoute$stop[[1]]$stop_id)<75000)
+GreenELineRoute1<-subset(GreenELineRoute$stop[[1]],70000<as.numeric(GreenELineRoute$stop[[1]]$stop_id)&as.numeric(GreenELineRoute$stop[[1]]$stop_id)<75000)
+BlueLineRoute1<-subset(BlueLineRoute$stop[[1]],70000<as.numeric(BlueLineRoute$stop[[1]]$stop_id)&as.numeric(BlueLineRoute$stop[[1]]$stop_id)<75000)
+OrangeLineRoute1<-subset(OrangeLineRoute$stop[[1]],70000<as.numeric(OrangeLineRoute$stop[[1]]$stop_id)&as.numeric(OrangeLineRoute$stop[[1]]$stop_id)<75000)
+MattapanLineRoute1<-subset(MattapanLineRoute$stop[[1]],70000<as.numeric(MattapanLineRoute$stop[[1]]$stop_id)&as.numeric(MattapanLineRoute$stop[[1]]$stop_id)<75000)
+```
+
+Green-B Line route (GreenBLineRoute)
+```{r echo=FALSE}
+head(GreenBLineRoute$stop[[1]])
+```
+
+```{r echo=FALSE}
+# RedLineStops
+south_main <- data.frame(
+  stop_id = c("70061","70063","70065","70067","70069","70071","70073","70075","70077","70079","70081"),
+  next_stop = c("70063","70065","70067","70069","70071","70073","70075","70077","70079","70081","70083"),stringsAsFactors=FALSE)
+
+south_a <- data.frame(
+  stop_id = c("70083","70085","70087","70089","70091"),
+  next_stop = c("70085","70087","70089","70091","70093"),stringsAsFactors=FALSE)
+
+south_b <- data.frame(
+  stop_id = c("70083","70095","70097","70099","70101","70103"),
+  next_stop = c("70095","70097","70099","70101","70103","70105"),stringsAsFactors=FALSE)
+
+north_main <- data.frame(
+  stop_id = c("70084","70082","70080","70078","70076","70074","70072","70070","70068","70066","70064"),
+  next_stop = c("70082","70080","70078","70076","70074","70072","70070","70068","70066","70064","70061"),stringsAsFactors=FALSE)
+north_a <- data.frame(
+  stop_id = c("70094","70092","70090","70088","70086"),
+  next_stop = c("70092","70090","70088","70086","70084"),stringsAsFactors=FALSE)
+north_b <- data.frame(
+  stop_id = c("70105","70104","70102","70100","70098","70096"),
+  next_stop = c("70104","70102","70100","70098","70096","70084"),stringsAsFactors=FALSE)
+
+# Then rbind everything together
+RedLineStopPairs <- rbind(south_main, south_a, south_b, north_main, north_a, north_b)
+RedLineStopPairs$stop_id <- as.numeric(RedLineStopPairs$stop_id)
+RedLineStopPairs$next_stop <- as.numeric(RedLineStopPairs$next_stop)
+colnames(RedLineStopPairs)<-c("stop_id","next_stop")
+RedLineStopPairs
+#Generate Route pairs
+GreenLineBStopPairs<-data.frame(rbind(cbind(shift(as.numeric(GreenBLineRoute$stop[[1]]$stop_id,1)), as.numeric(GreenBLineRoute$stop[[1]]$stop_id))[-1,],
+                                      cbind(shift(as.numeric(GreenBLineRoute$stop[[2]]$stop_id,1)), as.numeric(GreenBLineRoute$stop[[2]]$stop_id))[-1,]),stringsAsFactors=FALSE)
+colnames(GreenLineBStopPairs)<-c("stop_id","next_stop")
+
+GreenLineDStopPairs<-data.frame(rbind(cbind(shift(as.numeric(GreenDLineRoute$stop[[1]]$stop_id,1)), as.numeric(GreenDLineRoute$stop[[1]]$stop_id))[-1,],
+                                      cbind(shift(as.numeric(GreenDLineRoute$stop[[2]]$stop_id,1)), as.numeric(GreenDLineRoute$stop[[2]]$stop_id))[-1,]),stringsAsFactors=FALSE)
+colnames(GreenLineDStopPairs)<-c("stop_id","next_stop")
+
+GreenLineEStopPairs<-data.frame(rbind(cbind(shift(as.numeric(GreenELineRoute$stop[[1]]$stop_id,1)), as.numeric(GreenELineRoute$stop[[1]]$stop_id))[-1,],
+                                      cbind(shift(as.numeric(GreenELineRoute$stop[[2]]$stop_id,1)), as.numeric(GreenELineRoute$stop[[2]]$stop_id))[-1,]),stringsAsFactors=FALSE)
+colnames(GreenLineEStopPairs)<-c("stop_id","next_stop")
+
+GreenLineCStopPairs<-data.frame(rbind(cbind(shift(as.numeric(GreenCLineRoute$stop[[1]]$stop_id,1)), as.numeric(GreenCLineRoute$stop[[1]]$stop_id))[-1,],
+                                      cbind(shift(as.numeric(GreenCLineRoute$stop[[2]]$stop_id,1)), as.numeric(GreenCLineRoute$stop[[2]]$stop_id))[-1,]),stringsAsFactors=FALSE)
+colnames(GreenLineCStopPairs)<-c("stop_id","next_stop")
+
+OrangeLineStopPairs<-data.frame(rbind(cbind(shift(as.numeric(OrangeLineRoute$stop[[1]]$stop_id,1)), as.numeric(OrangeLineRoute$stop[[1]]$stop_id))[-1,],
+                                      cbind(shift(as.numeric(OrangeLineRoute$stop[[2]]$stop_id,1)), as.numeric(OrangeLineRoute$stop[[2]]$stop_id))[-1,]),stringsAsFactors=FALSE)
+colnames(OrangeLineStopPairs)<-c("stop_id","next_stop")
+
+BlueLineStopPairs<-data.frame(rbind(cbind(shift(as.numeric(BlueLineRoute$stop[[1]]$stop_id,1)), as.numeric(BlueLineRoute$stop[[1]]$stop_id))[-1,],
+                                      cbind(shift(as.numeric(BlueLineRoute$stop[[2]]$stop_id,1)), as.numeric(BlueLineRoute$stop[[2]]$stop_id))[-1,]),stringsAsFactors=FALSE)
+colnames(BlueLineStopPairs)<-c("stop_id","next_stop")
+
+StopsComplete<-data.frame(fromJSON(paste(TStopsURL3))$data)
+
+AllStopPairs<-data.frame(rbind(as.matrix(cbind(RedLineStopPairs,rep("Red",nrow(RedLineStopPairs)))),
+                    as.matrix(cbind(GreenLineBStopPairs,rep("Green-B",nrow(GreenLineBStopPairs)))),
+                    as.matrix(cbind(GreenLineCStopPairs,rep("Green-C",nrow(GreenLineCStopPairs)))),
+                    as.matrix(cbind(GreenLineDStopPairs,rep("Green-D",nrow(GreenLineDStopPairs)))),
+                    as.matrix(cbind(GreenLineEStopPairs,rep("Green-E",nrow(GreenLineEStopPairs)))),
+                    as.matrix(cbind(OrangeLineStopPairs,rep("Orange",nrow(OrangeLineStopPairs)))),
+                    as.matrix(cbind(BlueLineStopPairs,rep("Blue",nrow(BlueLineStopPairs))))))
+colnames(AllStopPairs)<-c("stop_id","next_stop","route")
+
+```
+
+<br>
+##### The start date and end date for the APIV2/APIV3 data - currently set to one week data from Dec 1, 4 am to Dec 8, 4 am.
+```{r}
+startTime <- as.POSIXct("2017-12-01 04:00:00") 
+endTime <- as.POSIXct("2017-12-08 04:00:00") 
+numWeeks <- as.integer(unclass(endTime - startTime)/7)
+
+fromTime <- paste("&from_datetime=",as.numeric(startTime), sep="")
+toTime <- paste("&to_datetime=",as.numeric(endTime), sep="")
+```
+
+
+### Generating Travel times with APIV2
+Code available in RMarkdown Source
+```{r echo=FALSE}
+#Red line Travel Times
+RedLineTravelTimes <- data.frame(direction=as.numeric(character()),
+                           dep_dt=as.POSIXct(character()), 
+                           arr_dt=as.POSIXct(character()), 
+                           travel_time_sec=as.numeric(character()),
+                           benchmark_travel_time_sec=as.numeric(character()),
+                           from_stop=character(), 
+                           to_stop=character()) 
+
+
+if(file.exists("RedLineTravelTimes.rds")) {
+  RedLineTravelTimes<-readRDS("RedLineTravelTimes.rds")
+  } else{
+    # This loop cycles through every distinct pair of stops.
+    for(j in 1:nrow(RedLineStopPairs)) {
+      from_j <- RedLineStopPairs[j,]$stop_id
+      to_j <- RedLineStopPairs[j,]$next_stop
+      fromStop <- paste("&from_stop=", from_j, sep="")
+      toStop <- paste("&to_stop=", to_j, sep="")
+      
+      # This loop cycles through each week. Currently it's set to 1.  
+      for(i in 0:numWeeks) {
+        fromTime <- paste("&from_datetime=", as.numeric(startTime + days(i * 7)), sep="")
+        toTime <- paste("&to_datetime=", as.numeric(startTime + days(i * 7) + days(7) - minutes(1)), sep="")
+        TRequest <- paste(TTravelURL2, TKeyAPIV2, TFormat, fromStop, toStop, fromTime, toTime, sep="")
+        foo <- fromJSON(TRequest)[[1]]
+        
+        if (length(foo) > 0) {
+          bar <- foo %>%
+            mutate(from_stop = as.integer(as.character(from_j)),
+                   to_stop = as.integer(as.character(to_j)),
+                   dep_dt = as.POSIXct(as.integer(dep_dt), origin="1970-01-01"),
+                   arr_dt = as.POSIXct(as.integer(arr_dt), origin="1970-01-01"),
+                   travel_time_sec = as.numeric(travel_time_sec),
+                   benchmark_travel_time_sec = as.numeric(benchmark_travel_time_sec)) %>%
+            select(-route_id, -contains("threshold"))
+          RedLineTravelTimes <- rbind(RedLineTravelTimes, bar)
+          cat(".")
+        } 
+      }
+      cat("\n")
+    }
+    
+    # data manipulations
+    RedLineTravelTimes <- mutate(RedLineTravelTimes, dep_d=as.Date(dep_dt), 
+                           dep_t=format(as.POSIXct(dep_dt), format="%H:%M:%S"), 
+                           arr_d=as.Date(arr_dt), 
+                           arr_t=format(as.POSIXct(arr_dt), format="%H:%M:%S"))
+    
+    RedLineTravelTimes <- bind_rows(RedLineRoute$stop[1][[1]], RedLineRoute$stop[2][[1]]) %>% 
+      select(stop_id, parent_station_name, stop_lat, stop_lon) %>% 
+      mutate(stop_id=as.integer(stop_id)) %>% 
+      rename(to_stop = stop_id, to_name = parent_station_name, to_lat = stop_lat, to_lon = stop_lon) %>% 
+      inner_join(RedLineTravelTimes, by="to_stop")
+    
+    RedLineTravelTimes <- bind_rows(RedLineRoute$stop[1][[1]], RedLineRoute$stop[2][[1]]) %>% 
+      select(stop_id, parent_station_name, stop_lat, stop_lon) %>% 
+      mutate(stop_id=as.integer(stop_id)) %>% 
+      rename(from_stop = stop_id, from_name = parent_station_name, from_lat = stop_lat, from_lon = stop_lon) %>% 
+      inner_join(RedLineTravelTimes, by="from_stop")
+    RedLineTravelTimes <- arrange(RedLineTravelTimes, direction, dep_dt)
+    saveRDS(RedLineTravelTimes , "RedLineTravelTimes.rds")
+  }
+
+#Green-B Line Travel times
+GreenLineBTravelTimes <- data.frame(direction=as.numeric(character()),
+                                 dep_dt=as.POSIXct(character()), 
+                                 arr_dt=as.POSIXct(character()), 
+                                 travel_time_sec=as.numeric(character()),
+                                 benchmark_travel_time_sec=as.numeric(character()),
+                                 from_stop=character(), 
+                                 to_stop=character()) 
+
+if(file.exists("GreenLineBTravelTimes.rds")) {
+  GreenLineBTravelTimes<-readRDS("GreenLineBTravelTimes.rds")
+  } else{
+    # This loop cycles through every distinct pair of stops.
+    for(j in 1:nrow(GreenLineBStopPairs)) {
+      from_j <- GreenLineBStopPairs[j,]$stop_id
+      to_j <- GreenLineBStopPairs[j,]$next_stop
+      fromStop <- paste("&from_stop=", from_j, sep="")
+      toStop <- paste("&to_stop=", to_j, sep="")
+      
+      # This loop cycles through each week. Currently it's set to 1.  
+      for(i in 0:numWeeks) {
+        fromTime <- paste("&from_datetime=", as.numeric(startTime + days(i * 7)), sep="")
+        toTime <- paste("&to_datetime=", as.numeric(startTime + days(i * 7) + days(7) - minutes(1)), sep="")
+        TRequest <- paste(TTravelURL2, TKeyAPIV2, TFormat, fromStop, toStop, fromTime, toTime, sep="")
+        foo <- fromJSON(TRequest)[[1]]
+        
+        if (length(foo) > 0) {
+          bar <- foo %>%
+            mutate(from_stop = as.integer(as.character(from_j)),
+                   to_stop = as.integer(as.character(to_j)),
+                   dep_dt = as.POSIXct(as.integer(dep_dt), origin="1970-01-01"),
+                   arr_dt = as.POSIXct(as.integer(arr_dt), origin="1970-01-01"),
+                   travel_time_sec = as.numeric(travel_time_sec),
+                   benchmark_travel_time_sec = as.numeric(benchmark_travel_time_sec)) %>%
+            select(-route_id, -contains("threshold"))
+          GreenLineBTravelTimes <- rbind(GreenLineBTravelTimes, bar)
+          cat(".")
+        } 
+      }
+      cat("\n")
+    }
+    
+    # data manipulations
+    GreenLineBTravelTimes <- mutate(GreenLineBTravelTimes, dep_d=as.Date(dep_dt), 
+                                 dep_t=format(as.POSIXct(dep_dt), format="%H:%M:%S"), 
+                                 arr_d=as.Date(arr_dt), 
+                                 arr_t=format(as.POSIXct(arr_dt), format="%H:%M:%S"))
+    
+    GreenLineBTravelTimes <- bind_rows(GreenBLineRoute$stop[1][[1]], GreenBLineRoute$stop[2][[1]]) %>% 
+      select(stop_id, parent_station_name, stop_lat, stop_lon) %>% 
+      mutate(stop_id=as.integer(stop_id)) %>% 
+      rename(to_stop = stop_id, to_name = parent_station_name, to_lat = stop_lat, to_lon = stop_lon) %>% 
+      inner_join(GreenLineBTravelTimes, by="to_stop")
+    
+    GreenLineBTravelTimes <- bind_rows(GreenBLineRoute$stop[1][[1]], GreenBLineRoute$stop[2][[1]]) %>% 
+      select(stop_id, parent_station_name, stop_lat, stop_lon) %>% 
+      mutate(stop_id=as.integer(stop_id)) %>% 
+      rename(from_stop = stop_id, from_name = parent_station_name, from_lat = stop_lat, from_lon = stop_lon) %>% 
+      inner_join(GreenLineBTravelTimes, by="from_stop")
+    
+    GreenLineBTravelTimes <- arrange(GreenLineBTravelTimes, direction, dep_dt)
+    
+    saveRDS(GreenLineBTravelTimes, "GreenLineBTravelTimes.rds")
+  }
+
+#Green-C Line Travel times
+GreenLineCTravelTimes <- data.frame(direction=as.numeric(character()),
+                                 dep_dt=as.POSIXct(character()), 
+                                 arr_dt=as.POSIXct(character()), 
+                                 travel_time_sec=as.numeric(character()),
+                                 benchmark_travel_time_sec=as.numeric(character()),
+                                 from_stop=character(), 
+                                 to_stop=character()) 
+
+if(file.exists("GreenLineCTravelTimes.rds")) {
+  GreenLineCTravelTimes<-readRDS("GreenLineCTravelTimes.rds")
+  } else{
+    # This loop cycles through every distinct pair of stops.
+    for(j in 1:nrow(GreenLineCStopPairs)) {
+      from_j <- GreenLineCStopPairs[j,]$stop_id
+      to_j <- GreenLineCStopPairs[j,]$next_stop
+      fromStop <- paste("&from_stop=", from_j, sep="")
+      toStop <- paste("&to_stop=", to_j, sep="")
+      
+      # This loop cycles through each week. Currently it's set to 1.  
+      for(i in 0:numWeeks) {
+        fromTime <- paste("&from_datetime=", as.numeric(startTime + days(i * 7)), sep="")
+        toTime <- paste("&to_datetime=", as.numeric(startTime + days(i * 7) + days(7) - minutes(1)), sep="")
+        TRequest <- paste(TTravelURL2, TKeyAPIV2, TFormat, fromStop, toStop, fromTime, toTime, sep="")
+        foo <- fromJSON(TRequest)[[1]]
+        
+        if (length(foo) > 0) {
+          bar <- foo %>%
+            mutate(from_stop = as.integer(as.character(from_j)),
+                   to_stop = as.integer(as.character(to_j)),
+                   dep_dt = as.POSIXct(as.integer(dep_dt), origin="1970-01-01"),
+                   arr_dt = as.POSIXct(as.integer(arr_dt), origin="1970-01-01"),
+                   travel_time_sec = as.numeric(travel_time_sec),
+                   benchmark_travel_time_sec = as.numeric(benchmark_travel_time_sec)) %>%
+            select(-route_id, -contains("threshold"))
+          GreenLineCTravelTimes <- rbind(GreenLineCTravelTimes, bar)
+          cat(".")
+        } 
+      }
+      cat("\n")
+    }
+    
+    # data manipulations
+    GreenLineCTravelTimes <- mutate(GreenLineCTravelTimes, dep_d=as.Date(dep_dt), 
+                                 dep_t=format(as.POSIXct(dep_dt), format="%H:%M:%S"), 
+                                 arr_d=as.Date(arr_dt), 
+                                 arr_t=format(as.POSIXct(arr_dt), format="%H:%M:%S"))
+    
+    GreenLineCTravelTimes <- bind_rows(GreenCLineRoute$stop[1][[1]], GreenCLineRoute$stop[2][[1]]) %>% 
+      select(stop_id, parent_station_name, stop_lat, stop_lon) %>% 
+      mutate(stop_id=as.integer(stop_id)) %>% 
+      rename(to_stop = stop_id, to_name = parent_station_name, to_lat = stop_lat, to_lon = stop_lon) %>% 
+      inner_join(GreenLineCTravelTimes, by="to_stop")
+    
+    GreenLineCTravelTimes <- bind_rows(GreenCLineRoute$stop[1][[1]], GreenCLineRoute$stop[2][[1]]) %>% 
+      select(stop_id, parent_station_name, stop_lat, stop_lon) %>% 
+      mutate(stop_id=as.integer(stop_id)) %>% 
+      rename(from_stop = stop_id, from_name = parent_station_name, from_lat = stop_lat, from_lon = stop_lon) %>% 
+      inner_join(GreenLineCTravelTimes, by="from_stop")
+    
+    GreenLineCTravelTimes <- arrange(GreenLineCTravelTimes, direction, dep_dt)
+    
+    saveRDS(GreenLineCTravelTimes, "GreenLineCTravelTimes.rds")
+  }
+
+#Green-D Line Travel times
+GreenLineDTravelTimes <- data.frame(direction=as.numeric(character()),
+                                 dep_dt=as.POSIXct(character()), 
+                                 arr_dt=as.POSIXct(character()), 
+                                 travel_time_sec=as.numeric(character()),
+                                 benchmark_travel_time_sec=as.numeric(character()),
+                                 from_stop=character(), 
+                                 to_stop=character()) 
+
+if(file.exists("GreenLineDTravelTimes.rds")) {
+  GreenLineDTravelTimes<-readRDS("GreenLineDTravelTimes.rds")
+  } else{
+    # This loop cycles through every distinct pair of stops.
+    for(j in 1:nrow(GreenLineDStopPairs)) {
+      from_j <- GreenLineDStopPairs[j,]$stop_id
+      to_j <- GreenLineDStopPairs[j,]$next_stop
+      fromStop <- paste("&from_stop=", from_j, sep="")
+      toStop <- paste("&to_stop=", to_j, sep="")
+      
+      # This loop cycles through each week. Currently it's set to 1.  
+      for(i in 0:numWeeks) {
+        fromTime <- paste("&from_datetime=", as.numeric(startTime + days(i * 7)), sep="")
+        toTime <- paste("&to_datetime=", as.numeric(startTime + days(i * 7) + days(7) - minutes(1)), sep="")
+        TRequest <- paste(TTravelURL2, TKeyAPIV2, TFormat, fromStop, toStop, fromTime, toTime, sep="")
+        foo <- fromJSON(TRequest)[[1]]
+        
+        if (length(foo) > 0) {
+          bar <- foo %>%
+            mutate(from_stop = as.integer(as.character(from_j)),
+                   to_stop = as.integer(as.character(to_j)),
+                   dep_dt = as.POSIXct(as.integer(dep_dt), origin="1970-01-01"),
+                   arr_dt = as.POSIXct(as.integer(arr_dt), origin="1970-01-01"),
+                   travel_time_sec = as.numeric(travel_time_sec),
+                   benchmark_travel_time_sec = as.numeric(benchmark_travel_time_sec)) %>%
+            select(-route_id, -contains("threshold"))
+          GreenLineDTravelTimes <- rbind(GreenLineDTravelTimes, bar)
+          cat(".")
+        } 
+      }
+      cat("\n")
+    }
+    
+    # data manipulations
+    GreenLineDTravelTimes <- mutate(GreenLineDTravelTimes, dep_d=as.Date(dep_dt), 
+                                 dep_t=format(as.POSIXct(dep_dt), format="%H:%M:%S"), 
+                                 arr_d=as.Date(arr_dt), 
+                                 arr_t=format(as.POSIXct(arr_dt), format="%H:%M:%S"))
+    
+    GreenLineDTravelTimes <- bind_rows(GreenDLineRoute$stop[1][[1]], GreenDLineRoute$stop[2][[1]]) %>% 
+      select(stop_id, parent_station_name, stop_lat, stop_lon) %>% 
+      mutate(stop_id=as.integer(stop_id)) %>% 
+      rename(to_stop = stop_id, to_name = parent_station_name, to_lat = stop_lat, to_lon = stop_lon) %>% 
+      inner_join(GreenLineDTravelTimes, by="to_stop")
+    
+    GreenLineDTravelTimes <- bind_rows(GreenDLineRoute$stop[1][[1]], GreenDLineRoute$stop[2][[1]]) %>% 
+      select(stop_id, parent_station_name, stop_lat, stop_lon) %>% 
+      mutate(stop_id=as.integer(stop_id)) %>% 
+      rename(from_stop = stop_id, from_name = parent_station_name, from_lat = stop_lat, from_lon = stop_lon) %>% 
+      inner_join(GreenLineDTravelTimes, by="from_stop")
+    
+    GreenLineDTravelTimes <- arrange(GreenLineDTravelTimes, direction, dep_dt)
+    
+    saveRDS(GreenLineDTravelTimes, "GreenLineDTravelTimes.rds")
+  }
+
+#Green-E Line Travel times
+GreenLineETravelTimes <- data.frame(direction=as.numeric(character()),
+                                 dep_dt=as.POSIXct(character()), 
+                                 arr_dt=as.POSIXct(character()), 
+                                 travel_time_sec=as.numeric(character()),
+                                 benchmark_travel_time_sec=as.numeric(character()),
+                                 from_stop=character(), 
+                                 to_stop=character()) 
+
+if(file.exists("GreenLineETravelTimes.rds")) {
+  GreenLineETravelTimes<-readRDS("GreenLineETravelTimes.rds")
+  } else{
+    # This loop cycles through every distinct pair of stops.
+    for(j in 1:nrow(GreenLineEStopPairs)) {
+      from_j <- GreenLineEStopPairs[j,]$stop_id
+      to_j <- GreenLineEStopPairs[j,]$next_stop
+      fromStop <- paste("&from_stop=", from_j, sep="")
+      toStop <- paste("&to_stop=", to_j, sep="")
+      
+      # This loop cycles through each week. Currently it's set to 1.  
+      for(i in 0:numWeeks) {
+        fromTime <- paste("&from_datetime=", as.numeric(startTime + days(i * 7)), sep="")
+        toTime <- paste("&to_datetime=", as.numeric(startTime + days(i * 7) + days(7) - minutes(1)), sep="")
+        TRequest <- paste(TTravelURL2, TKeyAPIV2, TFormat, fromStop, toStop, fromTime, toTime, sep="")
+        foo <- fromJSON(TRequest)[[1]]
+        
+        if (length(foo) > 0) {
+          bar <- foo %>%
+            mutate(from_stop = as.integer(as.character(from_j)),
+                   to_stop = as.integer(as.character(to_j)),
+                   dep_dt = as.POSIXct(as.integer(dep_dt), origin="1970-01-01"),
+                   arr_dt = as.POSIXct(as.integer(arr_dt), origin="1970-01-01"),
+                   travel_time_sec = as.numeric(travel_time_sec),
+                   benchmark_travel_time_sec = as.numeric(benchmark_travel_time_sec)) %>%
+            select(-route_id, -contains("threshold"))
+          GreenLineETravelTimes <- rbind(GreenLineETravelTimes, bar)
+          cat(".")
+        } 
+      }
+      cat("\n")
+    }
+    
+    # data manipulations
+    GreenLineETravelTimes <- mutate(GreenLineETravelTimes, dep_d=as.Date(dep_dt), 
+                                 dep_t=format(as.POSIXct(dep_dt), format="%H:%M:%S"), 
+                                 arr_d=as.Date(arr_dt), 
+                                 arr_t=format(as.POSIXct(arr_dt), format="%H:%M:%S"))
+    
+    GreenLineETravelTimes <- bind_rows(GreenELineRoute$stop[1][[1]], GreenELineRoute$stop[2][[1]]) %>% 
+      select(stop_id, parent_station_name, stop_lat, stop_lon) %>% 
+      mutate(stop_id=as.integer(stop_id)) %>% 
+      rename(to_stop = stop_id, to_name = parent_station_name, to_lat = stop_lat, to_lon = stop_lon) %>% 
+      inner_join(GreenLineETravelTimes, by="to_stop")
+    
+    GreenLineETravelTimes <- bind_rows(GreenELineRoute$stop[1][[1]], GreenELineRoute$stop[2][[1]]) %>% 
+      select(stop_id, parent_station_name, stop_lat, stop_lon) %>% 
+      mutate(stop_id=as.integer(stop_id)) %>% 
+      rename(from_stop = stop_id, from_name = parent_station_name, from_lat = stop_lat, from_lon = stop_lon) %>% 
+      inner_join(GreenLineETravelTimes, by="from_stop")
+    
+    GreenLineETravelTimes <- arrange(GreenLineETravelTimes, direction, dep_dt)
+    
+    saveRDS(GreenLineETravelTimes, "GreenLineETravelTimes.rds")
+  }
+
+#Orange line Travel times
+OrangeTravelTimes <- data.frame(direction=as.numeric(character()),
+                                 dep_dt=as.POSIXct(character()), 
+                                 arr_dt=as.POSIXct(character()), 
+                                 travel_time_sec=as.numeric(character()),
+                                 benchmark_travel_time_sec=as.numeric(character()),
+                                 from_stop=character(), 
+                                 to_stop=character()) 
+
+if(file.exists("OrangeTravelTimes.rds")) {
+  OrangeTravelTimes<-readRDS("OrangeTravelTimes.rds")
+  } else{
+    for(j in 1:nrow(OrangeLineStopPairs)) {
+      from_j <- OrangeLineStopPairs[j,]$stop_id
+      to_j <- OrangeLineStopPairs[j,]$next_stop
+      fromStop <- paste("&from_stop=", from_j, sep="")
+      toStop <- paste("&to_stop=", to_j, sep="")
+      for(i in 0:numWeeks) {
+        fromTime <- paste("&from_datetime=", as.numeric(startTime + days(i * 7)), sep="")
+        toTime <- paste("&to_datetime=", as.numeric(startTime + days(i * 7) + days(7) - minutes(1)), sep="")
+        TRequest <- paste(TTravelURL2, TKeyAPIV2, TFormat, fromStop, toStop, fromTime, toTime, sep="")
+        foo <- fromJSON(TRequest)[[1]]
+        
+        if (length(foo) > 0) {
+          bar <- foo %>%
+            mutate(from_stop = as.integer(as.character(from_j)),
+                   to_stop = as.integer(as.character(to_j)),
+                   dep_dt = as.POSIXct(as.integer(dep_dt), origin="1970-01-01"),
+                   arr_dt = as.POSIXct(as.integer(arr_dt), origin="1970-01-01"),
+                   travel_time_sec = as.numeric(travel_time_sec),
+                   benchmark_travel_time_sec = as.numeric(benchmark_travel_time_sec)) %>%
+            select(-route_id, -contains("threshold"))
+          OrangeTravelTimes <- rbind(OrangeTravelTimes, bar)
+          cat(".")
+        } 
+      }
+      cat("\n")
+    }
+    
+    # data manipulations
+    OrangeTravelTimes <- mutate(OrangeTravelTimes, dep_d=as.Date(dep_dt), 
+                                 dep_t=format(as.POSIXct(dep_dt), format="%H:%M:%S"), 
+                                 arr_d=as.Date(arr_dt), 
+                                 arr_t=format(as.POSIXct(arr_dt), format="%H:%M:%S"))
+    
+    OrangeTravelTimes <- bind_rows(OrangeLineRoute$stop[1][[1]], OrangeLineRoute$stop[2][[1]]) %>% 
+      select(stop_id, parent_station_name, stop_lat, stop_lon) %>% 
+      mutate(stop_id=as.integer(stop_id)) %>% 
+      rename(to_stop = stop_id, to_name = parent_station_name, to_lat = stop_lat, to_lon = stop_lon) %>% 
+      inner_join(OrangeTravelTimes, by="to_stop")
+    
+    OrangeTravelTimes <- bind_rows(OrangeLineRoute$stop[1][[1]], OrangeLineRoute$stop[2][[1]]) %>% 
+      select(stop_id, parent_station_name, stop_lat, stop_lon) %>% 
+      mutate(stop_id=as.integer(stop_id)) %>% 
+      rename(from_stop = stop_id, from_name = parent_station_name, from_lat = stop_lat, from_lon = stop_lon) %>% 
+      inner_join(OrangeTravelTimes, by="from_stop")
+    
+    OrangeTravelTimes <- arrange(OrangeTravelTimes, direction, dep_dt)
+    
+    saveRDS(OrangeTravelTimes, "OrangeTravelTimes.rds")
+  }
+
+#Blue Line Travel times - do it later
+BlueLineTravelTimes <- data.frame(direction=as.numeric(character()),
+                                 dep_dt=as.POSIXct(character()), 
+                                 arr_dt=as.POSIXct(character()), 
+                                 travel_time_sec=as.numeric(character()),
+                                 benchmark_travel_time_sec=as.numeric(character()),
+                                 from_stop=character(), 
+                                 to_stop=character()) 
+
+if(file.exists("BlueLineTravelTimes.rds")) {
+  BlueLineTravelTimes<-readRDS("BlueLineTravelTimes.rds")
+  } else{
+    for(j in 1:nrow(BlueLineStopPairs)) {
+      from_j <- BlueLineStopPairs[j,]$stop_id
+      to_j <- BlueLineStopPairs[j,]$next_stop
+      fromStop <- paste("&from_stop=", from_j, sep="")
+      toStop <- paste("&to_stop=", to_j, sep="")
+      for(i in 0:numWeeks) {
+        fromTime <- paste("&from_datetime=", as.numeric(startTime + days(i * 7)), sep="")
+        toTime <- paste("&to_datetime=", as.numeric(startTime + days(i * 7) + days(7) - minutes(1)), sep="")
+        TRequest <- paste(TTravelURL2, TKeyAPIV2, TFormat, fromStop, toStop, fromTime, toTime, sep="")
+        foo <- fromJSON(TRequest)[[1]]
+        
+        if (length(foo) > 0) {
+          bar <- foo %>%
+            mutate(from_stop = as.integer(as.character(from_j)),
+                   to_stop = as.integer(as.character(to_j)),
+                   dep_dt = as.POSIXct(as.integer(dep_dt), origin="1970-01-01"),
+                   arr_dt = as.POSIXct(as.integer(arr_dt), origin="1970-01-01"),
+                   travel_time_sec = as.numeric(travel_time_sec),
+                   benchmark_travel_time_sec = as.numeric(benchmark_travel_time_sec)) %>%
+            select(-route_id, -contains("threshold"))
+          BlueLineTravelTimes <- rbind(BlueLineTravelTimes, bar)
+          cat(".")
+        } 
+      }
+      cat("\n")
+    }
+    
+    # splitting date & time
+    BlueLineTravelTimes <- mutate(BlueLineTravelTimes, dep_d=as.Date(dep_dt), 
+                                 dep_t=format(as.POSIXct(dep_dt), format="%H:%M:%S"), 
+                                 arr_d=as.Date(arr_dt), 
+                                 arr_t=format(as.POSIXct(arr_dt), format="%H:%M:%S"))
+    
+    BlueLineTravelTimes <- bind_rows(BlueLineRoute$stop[1][[1]], BlueLineRoute$stop[2][[1]]) %>% 
+      select(stop_id, parent_station_name, stop_lat, stop_lon) %>% 
+      mutate(stop_id=as.integer(stop_id)) %>% 
+      rename(to_stop = stop_id, to_name = parent_station_name, to_lat = stop_lat, to_lon = stop_lon) %>% 
+      inner_join(BlueLineTravelTimes, by="to_stop")
+    
+    BlueLineTravelTimes <- bind_rows(BlueLineRoute$stop[1][[1]], BlueLineRoute$stop[2][[1]]) %>% 
+      select(stop_id, parent_station_name, stop_lat, stop_lon) %>% 
+      mutate(stop_id=as.integer(stop_id)) %>% 
+      rename(from_stop = stop_id, from_name = parent_station_name, from_lat = stop_lat, from_lon = stop_lon) %>% 
+      inner_join(BlueLineTravelTimes, by="from_stop")
+    
+    BlueLineTravelTimes <- arrange(BlueLineTravelTimes, direction, dep_dt)
+    
+    saveRDS(BlueLineTravelTimes, "BlueLineTravelTimes.rds")
+  }
+
+```
+
+### Statistical methods: Sampling Green-B line travel time data
+GreenLineBTravelTimes provides the travel times from each station to the nearest two stations within the same line. For Sampling I took 100 samples from the CombinedAllstonBUEast data which generates the travel times from Allston St to BU East from the processed. The processing steps looping through each station is hidden within the RMarkdown.
+```{r}
+set.seed(123)
+
+#Glimpse of GreenLineBTravelTimes
+head(GreenLineBTravelTimes)
+
+#Number of rows in GreenLineBTravelTimes
+nrow(GreenLineBTravelTimes)
+
+SamplingPlot <- plot_ly(x=GreenLineBTravelTimes$travel_time_sec, type="histogram", name="All GL stop pairs") %>%
+      layout(title="Green Line B travel time distribution", xaxis=list(range=c(0,200) , yaxis=list(title="Frequency")))
+
+AllstonToBUEast<-fromJSON(paste(TTravelURL2, TKeyAPIV2, TFormat, "&from_stop=", 70126, "&to_stop=", 70146, fromTime, toTime, sep=""))[[1]][c(1:5)]
+BUEastToAllston<-fromJSON(paste(TTravelURL2, TKeyAPIV2, TFormat, "&from_stop=", 70146, "&to_stop=", 70126, fromTime, toTime, sep=""))[[1]][c(1:5)]
+
+CombinedAllstonBUEast<-rbind(AllstonToBUEast,BUEastToAllston)
+CombinedAllstonBUEast$travel_time_sec<-as.numeric(CombinedAllstonBUEast$travel_time_sec)
+sd(CombinedAllstonBUEast$travel_time_sec)
+
+head(CombinedAllstonBUEast)
+
+SamplingPlot1 <- plot_ly(x=as.numeric(CombinedAllstonBUEast$travel_time_sec), type="histogram", name="Allston -> BU East") %>%
+      layout(title="Travel time distribution", xaxis=list(range=c(300,1700)), yaxis=list(title="Frequency"))
+```
+<br>
+```{r echo=FALSE, fig5, fig.align="center", fig.width= 10}
+subplot(SamplingPlot,SamplingPlot1)
+```
+
+#### Testing Central Limit theorem
+```{r}
+GreenLineBSubset<-aggregate(travel_time_sec ~ ., GreenLineBTravelTimes[c(2,6,9,12)], mean)
+GreenLineBSubset$travel_time_sec<-as.numeric(GreenLineBSubset$travel_time_sec)
+
+head(GreenLineBSubset)
+
+fit.subset <- density(GreenLineBSubset$travel_time_sec)
+fit.allston.bu <- density(CombinedAllstonBUEast$travel_time_sec)
+
+SamplingPlot2 <- plot_ly(x = GreenLineBSubset$travel_time_sec, type = "histogram", name="Histogram") %>%
+  add_trace(x = fit.subset$x, y = fit.subset$y, type = "scatter", mode = "lines", yaxis = "y2", name = "Density") %>% 
+      layout(title="Green-B travel time (Aggregate)", yaxis=list(title="Frequency"), yaxis2 = list(overlaying = "y", side = "right"))
+
+SamplingPlot2.1 <- plot_ly(x = CombinedAllstonBUEast$travel_time_sec, type = "histogram", name="Histogram") %>%
+  add_trace(x = fit.allston.bu$x, y = fit.allston.bu$y, type = "scatter", mode = "lines", yaxis = "y2", name = "Density") %>% 
+      layout(title="Allston St -> BU East time", xaxis=list(range=c(300,1700)), yaxis=list(title="Frequency"), yaxis2 = list(overlaying = "y", side = "right"))
+
+```
+<br>
+
+<div class="col2">
+```{r echo=FALSE, fig.width=6}
+SamplingPlot2
+```
+
+```{r echo=FALSE, fig.width=6}
+SamplingPlot2.1
+```
+</div>
+
+```{r}
+#Sampling with 1000 samples with sample size 5
+samples.5<-1000
+sample.size.5<-5
+xbar.5<-numeric(samples.5)
+meanGL.5<-mean(CombinedAllstonBUEast$travel_time_sec)
+sdGL.5<-sd(CombinedAllstonBUEast$travel_time_sec)
+for (i in 1: samples.5) {
+	xbar.5[i] <- mean(rnorm(sample.size.5, 
+	                meanGL.5, sdGL.5))
+}
+
+SamplingPlot3 <- plot_ly(x = xbar.5, type = "histogram", histnorm = "probability", name="Size = 5") %>%
+      layout(title="Sample size 5", xaxis=list(range=c(400,1600)))
+
+#Sampling with 1000 samples with sample size 10
+samples.10<-1000
+sample.size.10<-10
+xbar.10<-numeric(samples.10)
+meanGL.10<-mean(CombinedAllstonBUEast$travel_time_sec)
+sdGL.10<-sd(CombinedAllstonBUEast$travel_time_sec)
+for (i in 1: samples.10) {
+	xbar.10[i] <- mean(rnorm(sample.size.10, 
+	                meanGL.10, sdGL.10))
+}
+
+SamplingPlot4 <- plot_ly(x = xbar.10, type = "histogram", histnorm = "probability",name="Size = 10") %>%
+      layout(title="Sample size 10", xaxis=list(range=c(400,1600)))
+
+```
+
+```{r}
+#Sampling with 1000 samples with sample size 15
+samples.15<-1000
+sample.size.15<-15
+xbar.15<-numeric(samples.15)
+meanGL.15<-mean(CombinedAllstonBUEast$travel_time_sec)
+sdGL.15<-sd(CombinedAllstonBUEast$travel_time_sec)
+for (i in 1: samples.15) {
+	xbar.15[i] <- mean(rnorm(sample.size.15, 
+	                meanGL.15, sdGL.15))
+}
+
+SamplingPlot5 <- plot_ly(x = xbar.15, type = "histogram", histnorm = "probability",name="Size = 15") %>%
+      layout(title="Sample size 15", xaxis=list(range=c(400,1600)))
+
+#Sampling with 1000 samples with sample size 20
+samples.20<-1000
+sample.size.20<-20
+xbar.20<-numeric(samples.20)
+meanGL.20<-mean(CombinedAllstonBUEast$travel_time_sec)
+sdGL.20<-sd(CombinedAllstonBUEast$travel_time_sec)
+for (i in 1: samples.20) {
+	xbar.20[i] <- mean(rnorm(sample.size.20, 
+	                meanGL.20, sdGL.20))
+}
+
+SamplingPlot6 <- plot_ly(x = xbar.20, type = "histogram", histnorm = "probability" ,name="Size = 20") %>%
+      layout(title="Sample size 20", xaxis=list(range=c(400,1600)))
+```
+<br>
+
+<div class="col2">
+```{r echo=FALSE, fig.width=4}
+SamplingPlot3
+```
+
+```{r echo=FALSE, fig.width=4}
+SamplingPlot4
+```
+</div>
+<br>
+
+<div class="col2">
+```{r echo=FALSE, fig.width=4}
+SamplingPlot5
+```
+
+```{r echo=FALSE, fig.width=4}
+SamplingPlot6
+```
+</div>
+As the sample size increases, the standard deviation of the means decreases
+
+#Testing various Sampling methods on the data
+```{r}
+#SRSWR
+s <- srswr(100, nrow(CombinedAllstonBUEast))
+rows <- (1:nrow(CombinedAllstonBUEast))[s!=0]
+rows <- rep(rows, s[s != 0])
+sample.1 <- CombinedAllstonBUEast[rows, ]
+
+fit.sample.1<-density(sample.1$travel_time_sec)
+
+SamplingPlot7 <- plot_ly(x=sample.1$travel_time_sec, type="histogram", name="SRSWR") %>%
+  add_trace(x = fit.sample.1$x, y = fit.sample.1$y, type = "scatter", fill = "tozeroy", mode = "lines", yaxis = "y2", name = "Density") %>% 
+  layout(title="Simple Random Sampling :  Allston St -> BU East travel Time distribution", xaxis=list(range=c(300,1700)), yaxis2 = list(overlaying = "y", side = "right"))
+
+#SRSWOR
+s <- srswor(100,nrow(CombinedAllstonBUEast))
+sample.2 <- CombinedAllstonBUEast[s != 0, ]
+fit.sample.2=density(sample.2$travel_time_sec)
+SamplingPlot8 <- plot_ly(x=sample.2$travel_time_sec, type="histogram", name="SRSWOR") %>%
+  add_trace(x = fit.sample.2$x, y = fit.sample.2$y, type = "scatter", fill = "tozeroy", mode = "lines", yaxis = "y2", name = "Density") %>% 
+  layout(title="Simple Random Sampling :  Allston St -> BU East travel Time distribution", xaxis=list(range=c(300,1700)), yaxis2 = list(overlaying = "y", side = "right"))
+
+#Systematic Sampling
+N <- nrow(CombinedAllstonBUEast)
+n <- 100
+k <- ceiling(N / n)
+r <- sample(k, 1)
+
+# select every kth item
+s <- seq(r, by = k, length = n)
+sample.3 <- CombinedAllstonBUEast[s, ]
+sample.3<-na.omit(sample.3)
+fit.sample.3<-density(sample.3$travel_time_sec)
+SamplingPlot9 <- plot_ly(x=sample.3$travel_time_sec, type="histogram", name="Systematic") %>%
+  add_trace(x = fit.sample.3$x, y = fit.sample.3$y, type = "scatter", fill = "tozeroy", mode = "lines", yaxis = "y2", name = "Density") %>% 
+  layout(title="Systematic Sampling :  Allston St -> BU East travel Time distribution", xaxis=list(range=c(300,1700)), yaxis2 = list(overlaying = "y", side = "right"))
+
+fit.org.data = density(CombinedAllstonBUEast$travel_time_sec)
+
+SamplingPlot10 <- plot_ly(x=as.numeric(CombinedAllstonBUEast$travel_time_sec), type = "histogram", name = "Histogram") %>%
+      add_trace(x = fit.org.data$x, y = fit.org.data$y, type = "scatter", mode = "lines", yaxis = "y2", name = "Original") %>% 
+      add_trace(x = fit.sample.1$x, y = fit.sample.1$y, type = "scatter", mode = "lines", yaxis = "y2", name = "SRSWR") %>% 
+      add_trace(x = fit.sample.2$x, y = fit.sample.2$y, type = "scatter", mode = "lines", yaxis = "y2", name = "SRSWOR") %>% 
+      add_trace(x = fit.sample.3$x, y = fit.sample.3$y, type = "scatter", mode = "lines", yaxis = "y2", name = "Systematic")%>%
+    layout(title="Sampling methods combined - Allston St -> BU East travel time", xaxis=list(range=c(300,1700)), yaxis2 = list(overlaying = "y", side = "right"))
+```
+<br>
+```{r echo=FALSE, fig.align="center",  fig.width= 8}
+SamplingPlot7
+```
+<br>
+```{r echo=FALSE, fig.align="center",  fig.width= 8}
+SamplingPlot8
+```
+<br>
+```{r echo=FALSE, fig.align="center",  fig.width= 8}
+SamplingPlot9
+```
+<br>
+```{r echo=FALSE, fig.align="center",  fig.width= 8}
+SamplingPlot10
+```
+
+###Confidence Interval Allston St->BU East 80% & 90% over sample sizes 10, 25 & 50.
+```{r}
+conf<-c(80,90)
+alpha<- 1-conf/100
+
+#For sample size 10
+sample.size.10<-10
+sd.sample.means.10<-sd(as.numeric(CombinedAllstonBUEast$travel_time_sec))/sqrt(sample.size.10)
+
+sample.data.10<-sample(as.numeric(CombinedAllstonBUEast$travel_time_sec), size=sample.size.10)
+xbar.10<-mean(sample.data.10)
+
+confdf.10 <- data.frame(Date=as.Date(character()),
+                 File=character(), 
+                 User=character(), 
+                 stringsAsFactors=FALSE) 
+
+for(i in alpha) {
+  cf.10<-c(100*(1-i),xbar.10-qnorm(1-i/2)*sd.sample.means.10,xbar.10+qnorm(1-i/2)*sd.sample.means.10)
+  confdf.10<-rbind(confdf.10,cf.10)
+  str<-sprintf("%2d%% Conf Level (alpha=%.2f), CI=%.2f-%.2f",100*(1-i),i,xbar.10-qnorm(1-i/2)*sd.sample.means.10,xbar.10+qnorm(1-i/2)*sd.sample.means.10)
+  cat(str,"\n")
+}
+
+colnames(confdf.10)<-c("conf","ll","ul")
+
+fit.sample.conf.10<-density(sample.data.10)
+
+ConfidencePlot1 <- plot_ly(x=sample.data.10, type="histogram", name="Sampled Data") %>%
+  add_trace(x = fit.sample.conf.10$x, y = fit.sample.conf.10$y, type = "scatter", fill = "tozeroy", mode = "lines", yaxis = "y2", name = "Density") %>% 
+  add_trace(x = rep(mean(CombinedAllstonBUEast$travel_time_sec),2), y = c(0,25) , type = "scatter", mode = "lines", name = "Mean") %>% 
+  add_trace(x = c(confdf.10$ll[1],confdf.10$ll[1],confdf.10$ul[1],confdf.10$ul[1]), y = c(0,25,25,0) , type = "scatter", fill = "tozeroy",  mode = "lines", name = "80% conf") %>% 
+  add_trace(x = c(confdf.10$ll[2],confdf.10$ll[2],confdf.10$ul[2],confdf.10$ul[2]), y = c(0,25,25,0) , type = "scatter", fill = "tozeroy",  mode = "lines", name = "90% conf") %>% 
+  add_trace(x = rep(mean(CombinedAllstonBUEast$travel_time_sec),2), y = c(0,25) , type = "scatter", color = "red", mode = "lines", name = "Mean") %>% 
+  layout(title="Confidence Interval - Sample Size 10 :  Allston St -> BU East travel Time distribution", xaxis=list(range=c(300,1700)), yaxis2 = list(overlaying = "y", side = "right"))
+
+#For Sample size 50
+sample.size.50<-50
+sd.sample.means.50<-sd(as.numeric(CombinedAllstonBUEast$travel_time_sec))/sqrt(sample.size.50)
+
+sample.data.50<-sample(as.numeric(CombinedAllstonBUEast$travel_time_sec), size=sample.size.50)
+xbar.50<-mean(sample.data.50)
+
+confdf.50 <- data.frame(Date=as.Date(character()),
+                 File=character(), 
+                 User=character(), 
+                 stringsAsFactors=FALSE) 
+
+for(i in alpha) {
+  cf.50<-c(100*(1-i),xbar.50-qnorm(1-i/2)*sd.sample.means.50,xbar.50+qnorm(1-i/2)*sd.sample.means.50)
+  confdf.50<-rbind(confdf.50,cf.50)
+  str<-sprintf("%2d%% Conf Level (alpha=%.2f), CI=%.2f-%.2f",100*(1-i),i,xbar.50-qnorm(1-i/2)*sd.sample.means.50,xbar.50+qnorm(1-i/2)*sd.sample.means.50)
+  cat(str,"\n")
+}
+colnames(confdf.50)<-c("conf","ll","ul")
+
+fit.sample.conf.50<-density(sample.data.50)
+
+ConfidencePlot2 <- plot_ly(x=sample.data.50, type="histogram", name="Sampled Data") %>%
+  add_trace(x = fit.sample.conf.50$x, y = fit.sample.conf.50$y, type = "scatter", fill = "tozeroy", mode = "lines", yaxis = "y2", name = "Density") %>% 
+  add_trace(x = rep(mean(CombinedAllstonBUEast$travel_time_sec),2), y = c(0,25) , type = "scatter", mode = "lines", name = "Mean") %>% 
+  add_trace(x = c(confdf.50$ll[1],confdf.50$ll[1],confdf.50$ul[1],confdf.50$ul[1]), y = c(0,25,25,0) , type = "scatter", fill = "tozeroy", mode = "lines", name = "80% conf") %>% 
+  add_trace(x = c(confdf.50$ll[2],confdf.50$ll[2],confdf.50$ul[2],confdf.50$ul[2]), y = c(0,25,25,0) , type = "scatter", fill = "tozeroy", mode = "lines", name = "90% conf") %>% 
+  layout(title="Confidence Interval - Sample Size 50 :  Allston St -> BU East travel Time distribution", xaxis=list(range=c(300,1700)), yaxis2 = list(overlaying = "y", side = "right"))
+
+#For Sample size 75
+sample.size.75<-75
+sd.sample.means.75<-sd(as.numeric(CombinedAllstonBUEast$travel_time_sec))/sqrt(sample.size.75)
+
+sample.data.75<-sample(as.numeric(CombinedAllstonBUEast$travel_time_sec), size=sample.size.75)
+xbar.75<-mean(sample.data.75)
+
+confdf.75 <- data.frame(Date=as.Date(character()),
+                 File=character(), 
+                 User=character(), 
+                 stringsAsFactors=FALSE) 
+
+for(i in alpha) {
+  cf.75<-c(100*(1-i),xbar.75-qnorm(1-i/2)*sd.sample.means.75,xbar.75+qnorm(1-i/2)*sd.sample.means.75)
+  confdf.75<-rbind(confdf.75,cf.75)
+  str<-sprintf("%2d%% Conf Level (alpha=%.2f), CI=%.2f-%.2f",100*(1-i),i,xbar.75-qnorm(1-i/2)*sd.sample.means.75,xbar.75+qnorm(1-i/2)*sd.sample.means.75)
+  cat(str,"\n")
+}
+colnames(confdf.75)<-c("conf","ll","ul")
+
+fit.sample.conf.75<-density(sample.data.75)
+
+ConfidencePlot3 <- plot_ly(x=sample.data.75, type="histogram", name="Sampled Data") %>%
+  add_trace(x = fit.sample.conf.75$x, y = fit.sample.conf.75$y, type = "scatter", fill = "tozeroy", mode = "lines", yaxis = "y2", name = "Density") %>% 
+  add_trace(x = rep(mean(CombinedAllstonBUEast$travel_time_sec),2), y = c(0,25) , type = "scatter", mode = "lines", name = "Mean") %>% 
+  add_trace(x = c(confdf.75$ll[1],confdf.75$ll[1],confdf.75$ul[1],confdf.75$ul[1]), y = c(0,25,25,0) , type = "scatter", fill = "tozeroy", mode = "lines", name = "80% conf") %>% 
+  add_trace(x = c(confdf.75$ll[2],confdf.75$ll[2],confdf.75$ul[2],confdf.75$ul[2]), y = c(0,25,25,0) , type = "scatter", fill = "tozeroy", mode = "lines", name = "90% conf") %>% 
+  layout(title="Confidence Interval - Sample Size 75 :  Allston St -> BU East travel Time distribution", xaxis=list(range=c(300,1700)), yaxis2 = list(overlaying = "y", side = "right"))
+
+```
+<br>
+```{r echo=FALSE, fig.align="center",  fig.width= 8}
+ConfidencePlot1
+```
+<br>
+```{r echo=FALSE, fig.align="center",  fig.width= 8}
+ConfidencePlot2
+```
+<br>
+```{r echo=FALSE, fig.align="center",  fig.width= 8}
+ConfidencePlot3
+```
+Increasing the sample size decreases the width of confidence intervals, because it decreases the standard error. 
+
+### Plotting Travel Times as Box Plot
+Travel times provides the travel times from each station to the nearest two stations within the same line.
+```{r}
+head(RedLineTravelTimes)
+
+RedLineTrvTimeBoxPlot <- plot_ly(y=as.numeric(RedLineTravelTimes$travel_time_sec), color = RedLineTravelTimes$from_name, type = "box") %>%
+  layout(title="Box plot of Red Line Travel Times", yaxis=list(title="Time",range=c(0,1000)))
+
+GreenBLineTrvTimeBoxPlot <- plot_ly(y=as.numeric(GreenLineBTravelTimes$travel_time_sec), color = GreenLineBTravelTimes$from_name, type = "box") %>%
+  layout(title="Box plot of Green-B line travel times", yaxis=list(title="Time",range=c(0,1000)))
+
+GreenCLineTrvTimeBoxPlot <- plot_ly(y=as.numeric(GreenLineCTravelTimes$travel_time_sec), color = GreenLineCTravelTimes$from_name, type = "box") %>%
+  layout(title="Box plot of Green-C line travel times", yaxis=list(title="Time",range=c(0,1000)))
+
+GreenDLineTrvTimeBoxPlot <- plot_ly(y=as.numeric(GreenLineDTravelTimes$travel_time_sec), color = GreenLineDTravelTimes$from_name, type = "box") %>%
+  layout(title="Box plot of Green-D line travel times", yaxis=list(title="Time",range=c(0,1000)))
+
+GreenELineTrvTimeBoxPlot <- plot_ly(y=as.numeric(GreenLineETravelTimes$travel_time_sec), color = GreenLineETravelTimes$from_name, type = "box") %>%
+  layout(title="Box plot of Green-E line travel times", yaxis=list(title="Time",range=c(0,1000)))
+
+OrangeLineTrvTimeBoxPlot <- plot_ly(y=as.numeric(OrangeTravelTimes$travel_time_sec), color = OrangeTravelTimes$from_name, type = "box") %>%
+  layout(title="Box plot of Orange line travel times", yaxis=list(title="Time",range=c(0,1000)))
+
+BlueLineTrvTimeBoxPlot <- plot_ly(y=as.numeric(BlueLineTravelTimes$travel_time_sec), color = BlueLineTravelTimes$from_name, type = "box") %>%
+  layout(title="Box plot of Blue line travel times", yaxis=list(title="Time",range=c(0,1000)))
+```
+
+## Plotting Travel Times as Box Plot {.tabset .tabset-fade}
+
+### Red Line
+<br>
+```{r echo=FALSE, fig.align="center", fig.width= 10}
+RedLineTrvTimeBoxPlot
+```
+
+### Green-B Line
+<br>
+```{r echo=FALSE, fig.align="center", fig.width= 10}
+GreenBLineTrvTimeBoxPlot
+```
+
+### Green-C Line
+<br>
+```{r echo=FALSE, fig.align="center", fig.width= 10}
+GreenCLineTrvTimeBoxPlot
+```
+
+### Green-D Line
+<br>
+```{r echo=FALSE, fig.align="center", fig.width= 10}
+GreenDLineTrvTimeBoxPlot
+```
+
+### Green-E Line
+<br>
+```{r echo=FALSE, fig.align="center", fig.width= 10}
+GreenELineTrvTimeBoxPlot
+```
+
+### Orange Line
+<br>
+```{r echo=FALSE, fig.align="center", fig.width= 10}
+OrangeLineTrvTimeBoxPlot 
+```
+
+### Blue Line
+<br>
+```{r echo=FALSE, fig.align="center", fig.width= 10}
+BlueLineTrvTimeBoxPlot 
+```
+
+##
+
+### Generate Density plot for Travel Times for Red Line
+```{r}
+RLdensity <- with(RedLineTravelTimes %>% filter(direction == 1), tapply(travel_time_sec, INDEX = from_name, density))
+RLdf <- data.frame(
+  x = unlist(lapply(RLdensity, "[[", "x")),
+  y = unlist(lapply(RLdensity, "[[", "y")),
+  from_name = rep(names(RLdensity), each = length(RLdensity[[1]]$x))
+)
+RedLineDensityPlotN <- plot_ly(RLdf, x = ~x, y = ~y, color = ~from_name,  fill = 'tozeroy') %>%
+  add_lines() %>%
+  layout(title="Density Plot for Travel times for MBTA RL trains by departing station", yaxis=list(title="Density",range=c(0,0.4)), xaxis=list(title="NorthBound",range = c(0,600)))
+
+RLdensity <- with(RedLineTravelTimes %>% filter(direction == 0), tapply(travel_time_sec, INDEX = from_name, density))
+RLdf <- data.frame(
+  x = unlist(lapply(RLdensity, "[[", "x")),
+  y = unlist(lapply(RLdensity, "[[", "y")),
+  from_name = rep(names(RLdensity), each = length(RLdensity[[1]]$x))
+)
+RedLineDensityPlotS <- plot_ly(RLdf, x = ~x, y = ~y, color = ~from_name,  fill = 'tozeroy') %>%
+  add_lines() %>%
+  layout(yaxis=list(title="Density",range=c(0,0.4)), xaxis=list(title="SouthBound",range = c(0,600)))
+
+#Green-B
+GLBdensity <- with(GreenLineBTravelTimes %>% filter(direction == 1), tapply(travel_time_sec, INDEX = from_name, density))
+GLBdf <- data.frame(
+  x = unlist(lapply(GLBdensity, "[[", "x")),
+  y = unlist(lapply(GLBdensity, "[[", "y")),
+  from_name = rep(names(GLBdensity), each = length(GLBdensity[[1]]$x))
+)
+GreenLineBDensityPlotE <- plot_ly(GLBdf, x = ~x, y = ~y, color = ~from_name,  fill = 'tozeroy') %>%
+  add_lines() %>%
+  layout(title="Density Plot for Travel times for MBTA GL trains by departing station", yaxis=list(title="Density",range=c(0,0.25)), xaxis=list(title="EastBound",range = c(0,600)))
+
+GLBdensity <- with(GreenLineBTravelTimes %>% filter(direction == 0), tapply(travel_time_sec, INDEX = from_name, density))
+GLBdf <- data.frame(
+  x = unlist(lapply(GLBdensity, "[[", "x")),
+  y = unlist(lapply(GLBdensity, "[[", "y")),
+  from_name = rep(names(GLBdensity), each = length(GLBdensity[[1]]$x))
+)
+GreenLineBDensityPlotW <- plot_ly(GLBdf, x = ~x, y = ~y, color = ~from_name,  fill = 'tozeroy') %>%
+  add_lines() %>%
+  layout(yaxis=list(title="Density",range=c(0,0.25)), xaxis=list(title="West Bound",range = c(0,600)))
+
+#Green-C
+GLCdensity <- with(GreenLineCTravelTimes %>% filter(direction == 1), tapply(travel_time_sec, INDEX = from_name, density))
+GLCdf <- data.frame(
+  x = unlist(lapply(GLCdensity, "[[", "x")),
+  y = unlist(lapply(GLCdensity, "[[", "y")),
+  from_name = rep(names(GLCdensity), each = length(GLCdensity[[1]]$x))
+)
+GreenLineCDensityPlotE <- plot_ly(GLBdf, x = ~x, y = ~y, color = ~from_name,  fill = 'tozeroy') %>%
+  add_lines() %>%
+  layout(title="Density Plot for Green-C travel times trains by departing station", yaxis=list(title="Density",range=c(0,0.25)), xaxis=list(title="EastBound",range = c(0,600)))
+
+GLCdensity <- with(GreenLineCTravelTimes %>% filter(direction == 0), tapply(travel_time_sec, INDEX = from_name, density))
+GLCdf <- data.frame(
+  x = unlist(lapply(GLCdensity, "[[", "x")),
+  y = unlist(lapply(GLCdensity, "[[", "y")),
+  from_name = rep(names(GLCdensity), each = length(GLCdensity[[1]]$x))
+)
+GreenLineCDensityPlotW <- plot_ly(GLCdf, x = ~x, y = ~y, color = ~from_name,  fill = 'tozeroy') %>%
+  add_lines() %>%
+  layout(yaxis=list(title="Density",range=c(0,0.25)), xaxis=list(title="West Bound",range = c(0,600)))
+
+#Green-D
+GLDdensity <- with(GreenLineDTravelTimes %>% filter(direction == 1), tapply(travel_time_sec, INDEX = from_name, density))
+GLDdf <- data.frame(
+  x = unlist(lapply(GLDdensity, "[[", "x")),
+  y = unlist(lapply(GLDdensity, "[[", "y")),
+  from_name = rep(names(GLDdensity), each = length(GLDdensity[[1]]$x))
+)
+GreenLineDDensityPlotE <- plot_ly(GLDdf, x = ~x, y = ~y, color = ~from_name,  fill = 'tozeroy') %>%
+  add_lines() %>%
+  layout(title="Density Plot for Green-D travel times trains by departing station", yaxis=list(title="Density",range=c(0,0.25)), xaxis=list(title="EastBound",range = c(0,600)))
+
+GLDdensity <- with(GreenLineDTravelTimes %>% filter(direction == 0), tapply(travel_time_sec, INDEX = from_name, density))
+GLDdf <- data.frame(
+  x = unlist(lapply(GLDdensity, "[[", "x")),
+  y = unlist(lapply(GLDdensity, "[[", "y")),
+  from_name = rep(names(GLDdensity), each = length(GLDdensity[[1]]$x))
+)
+GreenLineDDensityPlotW <- plot_ly(GLDdf, x = ~x, y = ~y, color = ~from_name,  fill = 'tozeroy') %>%
+  add_lines() %>%
+  layout(yaxis=list(title="Density",range=c(0,0.25)), xaxis=list(title="West Bound",range = c(0,600)))
+
+
+#Green-E
+GLEdensity <- with(GreenLineETravelTimes %>% filter(direction == 1), tapply(travel_time_sec, INDEX = from_name, density))
+GLEdf <- data.frame(
+  x = unlist(lapply(GLEdensity, "[[", "x")),
+  y = unlist(lapply(GLEdensity, "[[", "y")),
+  from_name = rep(names(GLEdensity), each = length(GLEdensity[[1]]$x))
+)
+GreenLineEDensityPlotE <- plot_ly(GLEdf, x = ~x, y = ~y, color = ~from_name,  fill = 'tozeroy') %>%
+  add_lines() %>%
+  layout(title="Density Plot for Green-E travel times trains by departing station", yaxis=list(title="Density",range=c(0,0.25)), xaxis=list(title="EastBound",range = c(0,600)))
+
+GLEdensity <- with(GreenLineETravelTimes %>% filter(direction == 0), tapply(travel_time_sec, INDEX = from_name, density))
+GLEdf <- data.frame(
+  x = unlist(lapply(GLEdensity, "[[", "x")),
+  y = unlist(lapply(GLEdensity, "[[", "y")),
+  from_name = rep(names(GLEdensity), each = length(GLEdensity[[1]]$x))
+)
+GreenLineEDensityPlotW <- plot_ly(GLEdf, x = ~x, y = ~y, color = ~from_name,  fill = 'tozeroy') %>%
+  add_lines() %>%
+  layout(yaxis=list(title="Density",range=c(0,0.25)), xaxis=list(title="West Bound",range = c(0,600)))### Generate Density plot for #
+
+#Travel Times for Orange Line with Plotly
+OLdensity <- with(OrangeTravelTimes %>% filter(direction == 1), tapply(travel_time_sec, INDEX = from_name, density))
+OLdf <- data.frame(
+  x = unlist(lapply(OLdensity, "[[", "x")),
+  y = unlist(lapply(OLdensity, "[[", "y")),
+  from_name = rep(names(OLdensity), each = length(OLdensity[[1]]$x))
+)
+OrangeLineDensityPlotN <- plot_ly(OLdf, x = ~x, y = ~y, color = ~from_name,  fill = 'tozeroy') %>%
+  add_lines() %>%
+  layout(title="Density Plot for Travel times for MBTA OL trains by departing station", yaxis=list(title="Density",range=c(0,0.4)), xaxis=list(title="NorthBound",range = c(0,600)))
+
+OLdensity <- with(OrangeTravelTimes %>% filter(direction == 0), tapply(travel_time_sec, INDEX = from_name, density))
+OLdf <- data.frame(
+  x = unlist(lapply(OLdensity, "[[", "x")),
+  y = unlist(lapply(OLdensity, "[[", "y")),
+  from_name = rep(names(OLdensity), each = length(OLdensity[[1]]$x))
+)
+OrangeLineDensityPlotS <- plot_ly(OLdf, x = ~x, y = ~y, color = ~from_name,  fill = 'tozeroy') %>%
+  add_lines() %>%
+  layout(yaxis=list(title="Density",range=c(0,0.4)), xaxis=list(title="SouthBound",range = c(0,600)))
+
+#Travel Times for Blue Line with Plotly
+BLdensity <- with(BlueLineTravelTimes %>% filter(direction == 1), tapply(travel_time_sec, INDEX = from_name, density))
+BLdf <- data.frame(
+  x = unlist(lapply(BLdensity, "[[", "x")),
+  y = unlist(lapply(BLdensity, "[[", "y")),
+  from_name = rep(names(BLdensity), each = length(BLdensity[[1]]$x))
+)
+BlueLineDensityPlotN <- plot_ly(BLdf, x = ~x, y = ~y, color = ~from_name,  fill = 'tozeroy') %>%
+  add_lines() %>%
+  layout(title="Density Plot for Travel times for MBTA OL trains by departing station", yaxis=list(title="Density",range=c(0,0.4)), xaxis=list(title="NorthBound",range = c(0,600)))
+
+BLdensity <- with(BlueLineTravelTimes %>% filter(direction == 0), tapply(travel_time_sec, INDEX = from_name, density))
+BLdf <- data.frame(
+  x = unlist(lapply(BLdensity, "[[", "x")),
+  y = unlist(lapply(BLdensity, "[[", "y")),
+  from_name = rep(names(BLdensity), each = length(BLdensity[[1]]$x))
+)
+BlueLineDensityPlotS <- plot_ly(BLdf, x = ~x, y = ~y, color = ~from_name,  fill = 'tozeroy') %>%
+  add_lines() %>%
+  layout(yaxis=list(title="Density",range=c(0,0.4)), xaxis=list(title="SouthBound",range = c(0,600)))
+```
+
+## Plotting Travel Times as Density Plot {.tabset .tabset-fade}
+A Density Plot visualises the distribution of data over a continuous interval or time period.
+
+### Red Line
+<br>
+```{r echo=FALSE,fig.align="center", fig.width= 10}
+RedLineDensityPlotN
+
+RedLineDensityPlotS
+```
+
+### Green-B Line
+<br>
+```{r echo=FALSE, fig.align="center", fig.width= 10}
+GreenLineBDensityPlotE
+
+GreenLineBDensityPlotW
+```
+
+### Green-C Line
+<br>
+```{r echo=FALSE, fig.align="center", fig.width= 10}
+GreenLineCDensityPlotE
+
+GreenLineCDensityPlotW
+```
+
+### Green-D Line
+<br>
+```{r echo=FALSE, fig.align="center", fig.width= 10}
+GreenLineDDensityPlotE
+
+GreenLineDDensityPlotW
+```
+
+### Green-E Line
+<br>
+```{r echo=FALSE, fig.align="center", fig.width= 10}
+GreenLineEDensityPlotE
+
+GreenLineEDensityPlotW
+```
+
+### Orange Line
+<br>
+```{r echo=FALSE, fig.align="center", fig.width= 10}
+
+OrangeLineDensityPlotN
+
+OrangeLineDensityPlotS
+```
+
+### Blue Line
+<br>
+```{r echo=FALSE, fig.align="center", fig.width= 10}
+
+BlueLineDensityPlotN
+
+BlueLineDensityPlotS
+```
+
+##
+
+### Dwell Time
+Time spent by the train at a station.
+PS:I believe the data might be inconsistent
+```{r echo=FALSE}
+if(file.exists("RedLineDwellTimes.rds")) {
+  RedLineDwellTimes<-readRDS("RedLineDwellTimes.rds")
+  } else{
+        RedLineDwellTimes <- data.frame(direction=as.numeric(character()),
+                                   dep_dt=as.POSIXct(character()), 
+                                   arr_dt=as.POSIXct(character()), 
+                                   travel_time_sec=as.numeric(character()),
+                                   benchmark_travel_time_sec=as.numeric(character()),
+                                   from_stop=character(), 
+                                   to_stop=character()) 
+        RedLineUniqS<-unique(as.numeric(as.character(RedLineStopPairs$stop_id,RedLineStopPairs$next_stop)))
+        
+        for( i in RedLineUniqS) {
+          TDwellTime <- fromJSON(paste(TDwellsURL2, TKeyAPIV2, TFormat, "&stop=", RedLineRoute$stop[[1]]$stop_id[[1]], "&from_datetime=", as.numeric(as.POSIXct(startTime, format="%Y-%m-%d %H:%M:%OS")), "&to_datetime=", as.numeric(as.POSIXct(endTime, format="%Y-%m-%d %H:%M:%OS")), sep=""))[[1]]
+          RedLineDwellTimes <- rbind(RedLineDwellTimes,
+                                     cbind(TDwellTime,data.frame(rep(i,nrow(TDwellTime))),
+                                           data.frame(rep(RedLineTravelTimes$from_name[which(RedLineTravelTimes$from_stop == i)[1]],nrow(TDwellTime)))
+                                           ))
+        }
+        colnames(RedLineDwellTimes)[[6]] <- "stop_id"
+        colnames(RedLineDwellTimes)[[7]] <- "stop_name"
+        RedLineDwellTimes<-na.omit(RedLineDwellTimes)
+RedLineDwellTimes<-cbind(RedLineDwellTimes,strftime(as.POSIXct(as.numeric(RedLineDwellTimes$arr_dt), origin="1970-01-01"), format="%H"))
+        colnames(RedLineDwellTimes)[[8]] <- "hour_time"
+        
+        saveRDS(RedLineDwellTimes,"RedLineDwellTimes.rds")
+  }
+
+#GreenLineB Dwell data is inconsistent
+if(file.exists("GreenLineBDwellTimes.rds")) {
+  GreenLineBDwellTimes<-readRDS("GreenLineBDwellTimes.rds")
+  } else{
+        GreenLineBDwellTimes <- data.frame(direction=as.numeric(character()),
+                                   dep_dt=as.POSIXct(character()), 
+                                   arr_dt=as.POSIXct(character()), 
+                                   travel_time_sec=as.numeric(character()),
+                                   benchmark_travel_time_sec=as.numeric(character()),
+                                   from_stop=character(), 
+                                   to_stop=character()) 
+        GreenLineBUniqS<-unique(as.numeric(as.character(GreenLineBStopPairs$stop_id,GreenLineBStopPairs$next_stop)))
+        
+        for( i in GreenLineBUniqS) {
+          paste(TDwellsURL2, TKeyAPIV2, TFormat, "&stop=", GreenBLineRoute$stop[[1]]$stop_id[[1]], "&from_datetime=", as.numeric(as.POSIXct(startTime, format="%Y-%m-%d %H:%M:%OS")), "&to_datetime=", as.numeric(as.POSIXct(endTime, format="%Y-%m-%d %H:%M:%OS")), sep="")
+          TDwellTime <- fromJSON(paste(TDwellsURL2, TKeyAPIV2, TFormat, "&stop=", GreenBLineRoute$stop[[1]]$stop_id[[1]], "&from_datetime=", as.numeric(as.POSIXct(startTime, format="%Y-%m-%d %H:%M:%OS")), "&to_datetime=", as.numeric(as.POSIXct(endTime, format="%Y-%m-%d %H:%M:%OS")), sep=""))[[1]]
+          GreenLineBDwellTimes <- rbind(GreenLineBDwellTimes,
+                                     cbind(TDwellTime,data.frame(rep(i,nrow(TDwellTime))),
+                                           data.frame(rep(GreenLineBTravelTimes$from_name[which(GreenLineBTravelTimes$from_stop == i)[1]],nrow(TDwellTime)))
+                                           ))
+        }
+        colnames(GreenLineBDwellTimes)[[6]] <- "stop_id"
+        colnames(GreenLineBDwellTimes)[[7]] <- "stop_name"
+        GreenLineBDwellTimes<-na.omit(GreenLineBDwellTimes)
+        GreenLineBDwellTimes<-cbind(GreenLineBDwellTimes,strftime(as.POSIXct(as.numeric(GreenLineBDwellTimes$arr_dt), origin="1970-01-01"), format="%H"))
+        colnames(GreenLineBDwellTimes)[[8]] <- "hour_time"
+        saveRDS(GreenLineBDwellTimes,"GreenLineBDwellTimes.rds")
+  }
+
+if(file.exists("OrangeLineDwellTimes.rds")) {
+  OrangeLineDwellTimes<-readRDS("OrangeLineDwellTimes.rds")
+  } else{
+        OrangeLineDwellTimes <- data.frame(direction=as.numeric(character()),
+                                   dep_dt=as.POSIXct(character()), 
+                                   arr_dt=as.POSIXct(character()), 
+                                   travel_time_sec=as.numeric(character()),
+                                   benchmark_travel_time_sec=as.numeric(character()),
+                                   from_stop=character(), 
+                                   to_stop=character()) 
+        OrangeLineUniqS<-unique(as.numeric(as.character(OrangeLineStopPairs$stop_id,OrangeLineStopPairs$next_stop)))
+        
+        for( i in OrangeLineUniqS) {
+          paste(TDwellsURL2, TKeyAPIV2, TFormat, "&stop=", OrangeLineRoute$stop[[1]]$stop_id[[1]], "&from_datetime=", as.numeric(as.POSIXct(startTime, format="%Y-%m-%d %H:%M:%OS")), "&to_datetime=", as.numeric(as.POSIXct(endTime, format="%Y-%m-%d %H:%M:%OS")), sep="")
+          TDwellTime <- fromJSON(paste(TDwellsURL2, TKeyAPIV2, TFormat, "&stop=", OrangeLineRoute$stop[[1]]$stop_id[[1]], "&from_datetime=", as.numeric(as.POSIXct(startTime, format="%Y-%m-%d %H:%M:%OS")), "&to_datetime=", as.numeric(as.POSIXct(endTime, format="%Y-%m-%d %H:%M:%OS")), sep=""))[[1]]
+          OrangeLineDwellTimes <- rbind(OrangeLineDwellTimes,
+                                     cbind(TDwellTime,data.frame(rep(i,nrow(TDwellTime))),
+                                           data.frame(rep(OrangeTravelTimes$from_name[which(OrangeTravelTimes$from_stop == i)[1]],nrow(TDwellTime)))
+                                           ))
+        }
+        colnames(OrangeLineDwellTimes)[[6]] <- "stop_id"
+        colnames(OrangeLineDwellTimes)[[7]] <- "stop_name"
+        OrangeLineDwellTimes<-na.omit(OrangeLineDwellTimes)
+        OrangeLineDwellTimes<-cbind(OrangeLineDwellTimes,strftime(as.POSIXct(as.numeric(OrangeLineDwellTimes$arr_dt), origin="1970-01-01"), format="%H"))
+        colnames(OrangeLineDwellTimes)[[8]] <- "hour_time"
+        saveRDS(OrangeLineDwellTimes,"OrangeLineDwellTimes.rds")
+  }
+```
+
+RedLineDwellTimes Data
+```{r}
+head(RedLineDwellTimes)
+```
+
+### Scatter Plot of Red/Green-B/Orange Line Dwell Times during hours in a day
+```{r}
+df<-RedLineDwellTimes[,c(5,7,8)]
+df$dwell_time_sec<-as.double(df$dwell_time_sec)
+
+df1<-aggregate(dwell_time_sec ~ ., df, mean)
+df2<-aggregate(dwell_time_sec ~ hour_time, df1, mean)
+
+df3<-GreenLineBDwellTimes[,c(5,7,8)]
+df3$dwell_time_sec<-as.double(df3$dwell_time_sec)
+
+df4<-aggregate(dwell_time_sec ~ ., df3, mean)
+df5<-aggregate(dwell_time_sec ~ hour_time, df4, mean)
+
+df6<-OrangeLineDwellTimes[,c(5,7,8)]
+df6$dwell_time_sec<-as.double(df6$dwell_time_sec)
+
+df7<-aggregate(dwell_time_sec ~ ., df6, mean)
+df8<-aggregate(dwell_time_sec ~ hour_time, df7, mean)[-c(2),]
+
+df2new1<-cbind(df2,rep("Red",nrow(df2)))
+colnames(df2new1)<-c("hour_time","dwell_time_sec","route_name")
+df5new1<-cbind(df5,rep("Green-B",nrow(df5)))
+colnames(df5new1)<-c("hour_time","dwell_time_sec","route_name")
+df8new1<-cbind(df8,rep("Orange",nrow(df8)))
+colnames(df8new1)<-c("hour_time","dwell_time_sec","route_name")
+dfF<-rbind(df2new1,df5new1,df8new1)
+dfF$dwell_time_sec<-as.numeric(dfF$dwell_time_sec)
+RGODwellPlot<-plot_ly(dfF, x = ~hour_time, y = ~dwell_time_sec, color = ~route_name, type="bar", name="Dwell") %>%
+  layout(title="Dwell Times of trains during hours in a day",yaxis=list(title="Dwell time"),xaxis=list(title=""))
+
+```
+
+<br>
+```{r echo=FALSE, fig18, fig.align="center", fig.width= 10}
+RGODwellPlot
+```
+
+
+### Headway for Red/Green-B/Orange lines
+Headways track the time between departures at a given station. When trains are running late, headways exceed their benchmark targets. The underlying causes of slow/bad service can probably be better picked apart from travel times and dwell times, and the eventual impact to riders is most cleanly seen in headways.
+```{r echo=FALSE}
+if (file.exists("RedLineHeadway.rds")) {
+  RedLineHeadway <- readRDS("RedLineHeadway.rds")
+} else {
+  RedLineHeadway <- data.frame(direction=as.numeric(character()),
+                     current_dep_dt=as.POSIXct(character()), 
+                     previous_dep_dt=as.POSIXct(character()), 
+                     headway_time_sec=as.numeric(character()),
+                     benchmark_headway_time_sec=as.numeric(character()),
+                     from_stop=character(), 
+                     to_stop=character()) 
+  # This loop cycles through each stop pair.
+  for(j in 1:nrow(RedLineStopPairs)) {
+    from_j <- RedLineStopPairs[j,]$stop_id
+    to_j <- RedLineStopPairs[j,]$next_stop
+    fromStop <- paste("&stop=", from_j, sep="")
+    toStop <- paste("&to_stop=", to_j, sep="")
+    
+    # This loop cyles through each week. 
+    for(i in 0:numWeeks) {
+      fromTime <- paste("&from_datetime=", as.numeric(startTime + days(i * 7)), sep="")
+      toTime <- paste("&to_datetime=", as.numeric(startTime + days(i * 7) + days(7) - minutes(1)), sep="")
+      TRequest <- paste(THeadwaysURL2, TKeyAPIV2, TFormat, fromStop, toStop, fromTime, toTime, sep="")
+      foo <- fromJSON(TRequest)[[1]]
+      
+      if (length(foo) > 0) {
+        bar <- foo %>%
+          mutate(from_stop = as.integer(as.character(from_j)),
+                 to_stop = as.integer(as.character(to_j)),
+                 current_dep_dt = as.POSIXct(as.integer(current_dep_dt), origin="1970-01-01"),
+                 previous_dep_dt = as.POSIXct(as.integer(previous_dep_dt), origin="1970-01-01"),
+                 headway_time_sec = as.numeric(headway_time_sec),
+                 benchmark_headway_time_sec = as.numeric(benchmark_headway_time_sec)) %>%
+          select(-route_id, -contains("threshold"))
+        RedLineHeadway <- rbind(RedLineHeadway, bar)
+        cat(".")
+      } 
+    }
+    cat("\n")
+  }
+  
+  # data manipulations
+  RedLineHeadway <- mutate(RedLineHeadway, current_dep_d=as.Date(current_dep_dt), 
+                          current_dep_t=format(as.POSIXct(current_dep_dt), format="%H:%M:%S"), 
+                          previous_dep_d=as.Date(previous_dep_dt), 
+                          previous_dep_t=format(as.POSIXct(previous_dep_dt), format="%H:%M:%S"))
+  # combining parent_station_name, lat and lon
+  RedLineHeadway <- bind_rows(RedLineRoute$stop[1][[1]], RedLineRoute$stop[2][[1]]) %>% 
+    select(stop_id, parent_station_name, stop_lat, stop_lon) %>% 
+    mutate(stop_id=as.integer(stop_id)) %>% 
+    rename(to_stop = stop_id, to_name = parent_station_name, to_lat = stop_lat, to_lon = stop_lon) %>% 
+    inner_join(RedLineHeadway, by="to_stop")
+  RedLineHeadway <- bind_rows(RedLineRoute$stop[1][[1]], RedLineRoute$stop[2][[1]]) %>% 
+    select(stop_id, parent_station_name, stop_lat, stop_lon) %>% 
+    mutate(stop_id=as.integer(stop_id)) %>% 
+    rename(from_stop = stop_id, from_name = parent_station_name, from_lat = stop_lat, from_lon = stop_lon) %>% 
+    inner_join(RedLineHeadway, by="from_stop")
+  RedLineHeadway <- arrange(RedLineHeadway, direction, current_dep_dt)
+  
+  saveRDS(RedLineHeadway, "RedLineHeadway.rds")
+}
+
+#Headway for Green-B line
+if (file.exists("GreenLineBHeadway.rds")) {
+  GreenLineBHeadway <- readRDS("GreenLineBHeadway.rds")
+} else {
+  GreenLineBHeadway <- data.frame(direction=as.numeric(character()),
+                     current_dep_dt=as.POSIXct(character()), 
+                     previous_dep_dt=as.POSIXct(character()), 
+                     headway_time_sec=as.numeric(character()),
+                     benchmark_headway_time_sec=as.numeric(character()),
+                     from_stop=character(), 
+                     to_stop=character()) 
+  
+  # This loop cycles through each pair.
+  for(j in 1:nrow(GreenLineBStopPairs)) {
+    from_j <- GreenLineBStopPairs[j,]$stop_id
+    to_j <- GreenLineBStopPairs[j,]$next_stop
+    fromStop <- paste("&stop=", from_j, sep="")
+    toStop <- paste("&to_stop=", to_j, sep="")
+    
+    # This loop cycles through each week. Currently set to 1 week.
+    for(i in 0:numWeeks) {
+      fromTime <- paste("&from_datetime=", as.numeric(startTime + days(i * 7)), sep="")
+      toTime <- paste("&to_datetime=", as.numeric(startTime + days(i * 7) + days(7) - minutes(1)), sep="")
+      TRequest <- paste(THeadwaysURL2, TKeyAPIV2, TFormat, fromStop, toStop, fromTime, toTime, sep="")
+      foo <- fromJSON(TRequest)[[1]]
+      if (length(foo) > 0) {
+        bar <- foo %>%
+          mutate(from_stop = as.integer(as.character(from_j)),
+                 to_stop = as.integer(as.character(to_j)),
+                 current_dep_dt = as.POSIXct(as.integer(current_dep_dt), origin="1970-01-01"),
+                 previous_dep_dt = as.POSIXct(as.integer(previous_dep_dt), origin="1970-01-01"),
+                 headway_time_sec = as.numeric(headway_time_sec),
+                 benchmark_headway_time_sec = as.numeric(benchmark_headway_time_sec)) %>%
+          select(-route_id, -contains("threshold"))
+        GreenLineBHeadway <- rbind(GreenLineBHeadway, bar)
+        cat(".")
+      } 
+    }
+    cat("\n")
+  }
+  
+  # data manipulations
+  GreenLineBHeadway <- mutate(GreenLineBHeadway, current_dep_d=as.Date(current_dep_dt), 
+                          current_dep_t=format(as.POSIXct(current_dep_dt), format="%H:%M:%S"), 
+                          previous_dep_d=as.Date(previous_dep_dt), 
+                          previous_dep_t=format(as.POSIXct(previous_dep_dt), format="%H:%M:%S"))
+  # combing parent_station_name, lat and lon
+  GreenLineBHeadway <- bind_rows(GreenBLineRoute$stop[1][[1]], GreenBLineRoute$stop[2][[1]]) %>% 
+    select(stop_id, parent_station_name, stop_lat, stop_lon) %>% 
+    mutate(stop_id=as.integer(stop_id)) %>% 
+    rename(to_stop = stop_id, to_name = parent_station_name, to_lat = stop_lat, to_lon = stop_lon) %>% 
+    inner_join(GreenLineBHeadway, by="to_stop")
+  GreenLineBHeadway <- bind_rows(GreenBLineRoute$stop[1][[1]], GreenBLineRoute$stop[2][[1]]) %>% 
+    select(stop_id, parent_station_name, stop_lat, stop_lon) %>% 
+    mutate(stop_id=as.integer(stop_id)) %>% 
+    rename(from_stop = stop_id, from_name = parent_station_name, from_lat = stop_lat, from_lon = stop_lon) %>% 
+    inner_join(GreenLineBHeadway, by="from_stop")
+  GreenLineBHeadway <- arrange(GreenLineBHeadway, direction, current_dep_dt)
+  
+  saveRDS(GreenLineBHeadway, "GreenLineBHeadway.rds")
+}
+
+#Headway for Green-C line
+if (file.exists("GreenLineCHeadway.rds")) {
+  GreenLineCHeadway <- readRDS("GreenLineCHeadway.rds")
+} else {
+  GreenLineCHeadway <- data.frame(direction=as.numeric(character()),
+                     current_dep_dt=as.POSIXct(character()), 
+                     previous_dep_dt=as.POSIXct(character()), 
+                     headway_time_sec=as.numeric(character()),
+                     benchmark_headway_time_sec=as.numeric(character()),
+                     from_stop=character(), 
+                     to_stop=character()) 
+  
+  # This loop cycles through each pair.
+  for(j in 1:nrow(GreenLineCStopPairs)) {
+    from_j <- GreenLineCStopPairs[j,]$stop_id
+    to_j <- GreenLineCStopPairs[j,]$next_stop
+    fromStop <- paste("&stop=", from_j, sep="")
+    toStop <- paste("&to_stop=", to_j, sep="")
+    
+    # This loop cycles through each week. Currently set to 1 week.
+    for(i in 0:numWeeks) {
+      fromTime <- paste("&from_datetime=", as.numeric(startTime + days(i * 7)), sep="")
+      toTime <- paste("&to_datetime=", as.numeric(startTime + days(i * 7) + days(7) - minutes(1)), sep="")
+      TRequest <- paste(THeadwaysURL2, TKeyAPIV2, TFormat, fromStop, toStop, fromTime, toTime, sep="")
+      foo <- fromJSON(TRequest)[[1]]
+      if (length(foo) > 0) {
+        bar <- foo %>%
+          mutate(from_stop = as.integer(as.character(from_j)),
+                 to_stop = as.integer(as.character(to_j)),
+                 current_dep_dt = as.POSIXct(as.integer(current_dep_dt), origin="1970-01-01"),
+                 previous_dep_dt = as.POSIXct(as.integer(previous_dep_dt), origin="1970-01-01"),
+                 headway_time_sec = as.numeric(headway_time_sec),
+                 benchmark_headway_time_sec = as.numeric(benchmark_headway_time_sec)) %>%
+          select(-route_id, -contains("threshold"))
+        GreenLineCHeadway <- rbind(GreenLineCHeadway, bar)
+        cat(".")
+      } 
+    }
+    cat("\n")
+  }
+  
+  # data manipulations
+  GreenLineCHeadway <- mutate(GreenLineCHeadway, current_dep_d=as.Date(current_dep_dt), 
+                          current_dep_t=format(as.POSIXct(current_dep_dt), format="%H:%M:%S"), 
+                          previous_dep_d=as.Date(previous_dep_dt), 
+                          previous_dep_t=format(as.POSIXct(previous_dep_dt), format="%H:%M:%S"))
+  # combing parent_station_name, lat and lon
+  GreenLineCHeadway <- bind_rows(GreenCLineRoute$stop[1][[1]], GreenCLineRoute$stop[2][[1]]) %>% 
+    select(stop_id, parent_station_name, stop_lat, stop_lon) %>% 
+    mutate(stop_id=as.integer(stop_id)) %>% 
+    rename(to_stop = stop_id, to_name = parent_station_name, to_lat = stop_lat, to_lon = stop_lon) %>% 
+    inner_join(GreenLineCHeadway, by="to_stop")
+  GreenLineCHeadway <- bind_rows(GreenCLineRoute$stop[1][[1]], GreenCLineRoute$stop[2][[1]]) %>% 
+    select(stop_id, parent_station_name, stop_lat, stop_lon) %>% 
+    mutate(stop_id=as.integer(stop_id)) %>% 
+    rename(from_stop = stop_id, from_name = parent_station_name, from_lat = stop_lat, from_lon = stop_lon) %>% 
+    inner_join(GreenLineCHeadway, by="from_stop")
+  GreenLineCHeadway <- arrange(GreenLineCHeadway, direction, current_dep_dt)
+  
+  saveRDS(GreenLineCHeadway, "GreenLineCHeadway.rds")
+}
+
+#Headway for Green-D line
+if (file.exists("GreenLineDHeadway.rds")) {
+  GreenLineDHeadway <- readRDS("GreenLineDHeadway.rds")
+} else {
+  GreenLineDHeadway <- data.frame(direction=as.numeric(character()),
+                     current_dep_dt=as.POSIXct(character()), 
+                     previous_dep_dt=as.POSIXct(character()), 
+                     headway_time_sec=as.numeric(character()),
+                     benchmark_headway_time_sec=as.numeric(character()),
+                     from_stop=character(), 
+                     to_stop=character()) 
+  
+  # This loop cycles through each pair.
+  for(j in 1:nrow(GreenLineDStopPairs)) {
+    from_j <- GreenLineDStopPairs[j,]$stop_id
+    to_j <- GreenLineDStopPairs[j,]$next_stop
+    fromStop <- paste("&stop=", from_j, sep="")
+    toStop <- paste("&to_stop=", to_j, sep="")
+    
+    # This loop cycles through each week. Currently set to 1 week.
+    for(i in 0:numWeeks) {
+      fromTime <- paste("&from_datetime=", as.numeric(startTime + days(i * 7)), sep="")
+      toTime <- paste("&to_datetime=", as.numeric(startTime + days(i * 7) + days(7) - minutes(1)), sep="")
+      TRequest <- paste(THeadwaysURL2, TKeyAPIV2, TFormat, fromStop, toStop, fromTime, toTime, sep="")
+      foo <- fromJSON(TRequest)[[1]]
+      if (length(foo) > 0) {
+        bar <- foo %>%
+          mutate(from_stop = as.integer(as.character(from_j)),
+                 to_stop = as.integer(as.character(to_j)),
+                 current_dep_dt = as.POSIXct(as.integer(current_dep_dt), origin="1970-01-01"),
+                 previous_dep_dt = as.POSIXct(as.integer(previous_dep_dt), origin="1970-01-01"),
+                 headway_time_sec = as.numeric(headway_time_sec),
+                 benchmark_headway_time_sec = as.numeric(benchmark_headway_time_sec)) %>%
+          select(-route_id, -contains("threshold"))
+        GreenLineDHeadway <- rbind(GreenLineDHeadway, bar)
+        cat(".")
+      } 
+    }
+    cat("\n")
+  }
+  
+  # data manipulations
+  GreenLineDHeadway <- mutate(GreenLineDHeadway, current_dep_d=as.Date(current_dep_dt), 
+                          current_dep_t=format(as.POSIXct(current_dep_dt), format="%H:%M:%S"), 
+                          previous_dep_d=as.Date(previous_dep_dt), 
+                          previous_dep_t=format(as.POSIXct(previous_dep_dt), format="%H:%M:%S"))
+  # combing parent_station_name, lat and lon
+  GreenLineDHeadway <- bind_rows(GreenDLineRoute$stop[1][[1]], GreenDLineRoute$stop[2][[1]]) %>% 
+    select(stop_id, parent_station_name, stop_lat, stop_lon) %>% 
+    mutate(stop_id=as.integer(stop_id)) %>% 
+    rename(to_stop = stop_id, to_name = parent_station_name, to_lat = stop_lat, to_lon = stop_lon) %>% 
+    inner_join(GreenLineDHeadway, by="to_stop")
+  GreenLineDHeadway <- bind_rows(GreenDLineRoute$stop[1][[1]], GreenDLineRoute$stop[2][[1]]) %>% 
+    select(stop_id, parent_station_name, stop_lat, stop_lon) %>% 
+    mutate(stop_id=as.integer(stop_id)) %>% 
+    rename(from_stop = stop_id, from_name = parent_station_name, from_lat = stop_lat, from_lon = stop_lon) %>% 
+    inner_join(GreenLineDHeadway, by="from_stop")
+  GreenLineDHeadway <- arrange(GreenLineDHeadway, direction, current_dep_dt)
+  
+  saveRDS(GreenLineDHeadway, "GreenLineDHeadway.rds")
+}
+
+#Headway for Green-E line
+if (file.exists("GreenLineEHeadway.rds")) {
+  GreenLineEHeadway <- readRDS("GreenLineEHeadway.rds")
+} else {
+  GreenLineEHeadway <- data.frame(direction=as.numeric(character()),
+                     current_dep_dt=as.POSIXct(character()), 
+                     previous_dep_dt=as.POSIXct(character()), 
+                     headway_time_sec=as.numeric(character()),
+                     benchmark_headway_time_sec=as.numeric(character()),
+                     from_stop=character(), 
+                     to_stop=character()) 
+  
+  # This loop cycles through each pair.
+  for(j in 1:nrow(GreenLineEStopPairs)) {
+    from_j <- GreenLineEStopPairs[j,]$stop_id
+    to_j <- GreenLineEStopPairs[j,]$next_stop
+    fromStop <- paste("&stop=", from_j, sep="")
+    toStop <- paste("&to_stop=", to_j, sep="")
+    
+    # This loop cycles through each week. Currently set to 1 week.
+    for(i in 0:numWeeks) {
+      fromTime <- paste("&from_datetime=", as.numeric(startTime + days(i * 7)), sep="")
+      toTime <- paste("&to_datetime=", as.numeric(startTime + days(i * 7) + days(7) - minutes(1)), sep="")
+      TRequest <- paste(THeadwaysURL2, TKeyAPIV2, TFormat, fromStop, toStop, fromTime, toTime, sep="")
+      foo <- fromJSON(TRequest)[[1]]
+      if (length(foo) > 0) {
+        bar <- foo %>%
+          mutate(from_stop = as.integer(as.character(from_j)),
+                 to_stop = as.integer(as.character(to_j)),
+                 current_dep_dt = as.POSIXct(as.integer(current_dep_dt), origin="1970-01-01"),
+                 previous_dep_dt = as.POSIXct(as.integer(previous_dep_dt), origin="1970-01-01"),
+                 headway_time_sec = as.numeric(headway_time_sec),
+                 benchmark_headway_time_sec = as.numeric(benchmark_headway_time_sec)) %>%
+          select(-route_id, -contains("threshold"))
+        GreenLineEHeadway <- rbind(GreenLineEHeadway, bar)
+        cat(".")
+      } 
+    }
+    cat("\n")
+  }
+  
+  # data manipulations
+  GreenLineEHeadway <- mutate(GreenLineEHeadway, current_dep_d=as.Date(current_dep_dt), 
+                          current_dep_t=format(as.POSIXct(current_dep_dt), format="%H:%M:%S"), 
+                          previous_dep_d=as.Date(previous_dep_dt), 
+                          previous_dep_t=format(as.POSIXct(previous_dep_dt), format="%H:%M:%S"))
+  # combing parent_station_name, lat and lon
+  GreenLineEHeadway <- bind_rows(GreenELineRoute$stop[1][[1]], GreenELineRoute$stop[2][[1]]) %>% 
+    select(stop_id, parent_station_name, stop_lat, stop_lon) %>% 
+    mutate(stop_id=as.integer(stop_id)) %>% 
+    rename(to_stop = stop_id, to_name = parent_station_name, to_lat = stop_lat, to_lon = stop_lon) %>% 
+    inner_join(GreenLineEHeadway, by="to_stop")
+  GreenLineEHeadway <- bind_rows(GreenELineRoute$stop[1][[1]], GreenELineRoute$stop[2][[1]]) %>% 
+    select(stop_id, parent_station_name, stop_lat, stop_lon) %>% 
+    mutate(stop_id=as.integer(stop_id)) %>% 
+    rename(from_stop = stop_id, from_name = parent_station_name, from_lat = stop_lat, from_lon = stop_lon) %>% 
+    inner_join(GreenLineEHeadway, by="from_stop")
+  GreenLineEHeadway <- arrange(GreenLineEHeadway, direction, current_dep_dt)
+  
+  saveRDS(GreenLineEHeadway, "GreenLineEHeadway.rds")
+}
+
+#Headway for Orange line
+if (file.exists("OrangeLineHeadway.rds")) {
+  OrangeLineHeadway <- readRDS("OrangeLineHeadway.rds")
+} else {
+  OrangeLineHeadway <- data.frame(direction=as.numeric(character()),
+                     current_dep_dt=as.POSIXct(character()), 
+                     previous_dep_dt=as.POSIXct(character()), 
+                     headway_time_sec=as.numeric(character()),
+                     benchmark_headway_time_sec=as.numeric(character()),
+                     from_stop=character(), 
+                     to_stop=character()) 
+  
+  # This loop cycles through the stop pairs.
+  for(j in 1:nrow(OrangeLineStopPairs)) {
+    from_j <- OrangeLineStopPairs[j,]$stop_id
+    to_j <- OrangeLineStopPairs[j,]$next_stop
+    fromStop <- paste("&stop=", from_j, sep="")
+    toStop <- paste("&to_stop=", to_j, sep="")
+    
+    # This loop cycles through each week.
+    for(i in 0:numWeeks) {
+      fromTime <- paste("&from_datetime=", as.numeric(startTime + days(i * 7)), sep="")
+      toTime <- paste("&to_datetime=", as.numeric(startTime + days(i * 7) + days(7) - minutes(1)), sep="")
+      TRequest <- paste(THeadwaysURL2, TKeyAPIV2, TFormat, fromStop, toStop, fromTime, toTime, sep="")
+      foo <- fromJSON(TRequest)[[1]]
+      if (length(foo) > 0) {
+        bar <- foo %>%
+          mutate(from_stop = as.integer(as.character(from_j)),
+                 to_stop = as.integer(as.character(to_j)),
+                 current_dep_dt = as.POSIXct(as.integer(current_dep_dt), origin="1970-01-01"),
+                 previous_dep_dt = as.POSIXct(as.integer(previous_dep_dt), origin="1970-01-01"),
+                 headway_time_sec = as.numeric(headway_time_sec),
+                 benchmark_headway_time_sec = as.numeric(benchmark_headway_time_sec)) %>%
+          select(-route_id, -contains("threshold"))
+        OrangeLineHeadway <- rbind(OrangeLineHeadway, bar)
+        cat(".")
+      } 
+    }
+    cat("\n")
+  }
+  
+  # data manipulations
+  OrangeLineHeadway <- mutate(OrangeLineHeadway, current_dep_d=as.Date(current_dep_dt), 
+                          current_dep_t=format(as.POSIXct(current_dep_dt), format="%H:%M:%S"), 
+                          previous_dep_d=as.Date(previous_dep_dt), 
+                          previous_dep_t=format(as.POSIXct(previous_dep_dt), format="%H:%M:%S"))
+  # combining parent_station_name, lat and lon
+  OrangeLineHeadway <- bind_rows(OrangeLineRoute$stop[1][[1]], OrangeLineRoute$stop[2][[1]]) %>% 
+    select(stop_id, parent_station_name, stop_lat, stop_lon) %>% 
+    mutate(stop_id=as.integer(stop_id)) %>% 
+    rename(to_stop = stop_id, to_name = parent_station_name, to_lat = stop_lat, to_lon = stop_lon) %>% 
+    inner_join(OrangeLineHeadway, by="to_stop")
+  OrangeLineHeadway <- bind_rows(OrangeLineRoute$stop[1][[1]], OrangeLineRoute$stop[2][[1]]) %>% 
+    select(stop_id, parent_station_name, stop_lat, stop_lon) %>% 
+    mutate(stop_id=as.integer(stop_id)) %>% 
+    rename(from_stop = stop_id, from_name = parent_station_name, from_lat = stop_lat, from_lon = stop_lon) %>% 
+    inner_join(OrangeLineHeadway, by="from_stop")
+  OrangeLineHeadway <- arrange(OrangeLineHeadway, direction, current_dep_dt)
+  
+  saveRDS(OrangeLineHeadway, "OrangeLineHeadway.rds")
+}
+
+#Headway for Blue line
+if (file.exists("BlueLineHeadway.rds")) {
+  BlueLineHeadway <- readRDS("BlueLineHeadway.rds")
+} else {
+  BlueLineHeadway <- data.frame(direction=as.numeric(character()),
+                     current_dep_dt=as.POSIXct(character()), 
+                     previous_dep_dt=as.POSIXct(character()), 
+                     headway_time_sec=as.numeric(character()),
+                     benchmark_headway_time_sec=as.numeric(character()),
+                     from_stop=character(), 
+                     to_stop=character()) 
+  
+  # This loop cycles through the stop pairs.
+  for(j in 1:nrow(BlueLineStopPairs)) {
+    from_j <- BlueLineStopPairs[j,]$stop_id
+    to_j <- BlueLineStopPairs[j,]$next_stop
+    fromStop <- paste("&stop=", from_j, sep="")
+    toStop <- paste("&to_stop=", to_j, sep="")
+    
+    # This loop cycles through each week.
+    for(i in 0:numWeeks) {
+      fromTime <- paste("&from_datetime=", as.numeric(startTime + days(i * 7)), sep="")
+      toTime <- paste("&to_datetime=", as.numeric(startTime + days(i * 7) + days(7) - minutes(1)), sep="")
+      TRequest <- paste(THeadwaysURL2, TKeyAPIV2, TFormat, fromStop, toStop, fromTime, toTime, sep="")
+      foo <- fromJSON(TRequest)[[1]]
+      if (length(foo) > 0) {
+        bar <- foo %>%
+          mutate(from_stop = as.integer(as.character(from_j)),
+                 to_stop = as.integer(as.character(to_j)),
+                 current_dep_dt = as.POSIXct(as.integer(current_dep_dt), origin="1970-01-01"),
+                 previous_dep_dt = as.POSIXct(as.integer(previous_dep_dt), origin="1970-01-01"),
+                 headway_time_sec = as.numeric(headway_time_sec),
+                 benchmark_headway_time_sec = as.numeric(benchmark_headway_time_sec)) %>%
+          select(-route_id, -contains("threshold"))
+        BlueLineHeadway <- rbind(BlueLineHeadway, bar)
+        cat(".")
+      } 
+    }
+    cat("\n")
+  }
+  
+  # data manipulations
+  BlueLineHeadway <- mutate(BlueLineHeadway, current_dep_d=as.Date(current_dep_dt), 
+                          current_dep_t=format(as.POSIXct(current_dep_dt), format="%H:%M:%S"), 
+                          previous_dep_d=as.Date(previous_dep_dt), 
+                          previous_dep_t=format(as.POSIXct(previous_dep_dt), format="%H:%M:%S"))
+  # combining parent_station_name, lat and lon
+  BlueLineHeadway <- bind_rows(BlueLineRoute$stop[1][[1]], BlueLineRoute$stop[2][[1]]) %>% 
+    select(stop_id, parent_station_name, stop_lat, stop_lon) %>% 
+    mutate(stop_id=as.integer(stop_id)) %>% 
+    rename(to_stop = stop_id, to_name = parent_station_name, to_lat = stop_lat, to_lon = stop_lon) %>% 
+    inner_join(BlueLineHeadway, by="to_stop")
+  BlueLineHeadway <- bind_rows(BlueLineRoute$stop[1][[1]], BlueLineRoute$stop[2][[1]]) %>% 
+    select(stop_id, parent_station_name, stop_lat, stop_lon) %>% 
+    mutate(stop_id=as.integer(stop_id)) %>% 
+    rename(from_stop = stop_id, from_name = parent_station_name, from_lat = stop_lat, from_lon = stop_lon) %>% 
+    inner_join(BlueLineHeadway, by="from_stop")
+  BlueLineHeadway <- arrange(BlueLineHeadway, direction, current_dep_dt)
+  
+  saveRDS(BlueLineHeadway, "BlueLineHeadway.rds")
+}
+```
+
+###Box Plot of Headways for lines by station
+```{r }
+RedLineHeadway<-na.omit(RedLineHeadway)
+head(RedLineHeadway)
+RedLineHeadwayBoxPlot <- plot_ly(RedLineHeadway, y = ~(headway_time_sec), color = ~from_name, type = "box")%>%
+  layout(title="Headway Red Line", yaxis=list(title="Headway time",range=c(0,2000)))
+
+###Plot Green Line B Headway
+GreenLineBHeadway<-na.omit(GreenLineBHeadway)
+
+GreenLineBHeadwayBoxPlot <- plot_ly(GreenLineBHeadway, y = ~(headway_time_sec), color = ~from_name, type = "box")%>%
+  layout(title="Headway Green-B line", yaxis=list(title="Headway time",range=c(0,2000)))
+
+###Plot Green Line C Headway
+GreenLineCHeadway<-na.omit(GreenLineCHeadway)
+
+GreenLineCHeadwayBoxPlot <- plot_ly(GreenLineCHeadway, y = ~(headway_time_sec), color = ~from_name, type = "box")%>%
+  layout(title="Headway Green-C line", yaxis=list(title="Headway time",range=c(0,2000)))
+
+###Plot Green Line D Headway
+GreenLineDHeadway<-na.omit(GreenLineDHeadway)
+
+GreenLineDHeadwayBoxPlot <- plot_ly(GreenLineDHeadway, y = ~(headway_time_sec), color = ~from_name, type = "box")%>%
+  layout(title="Headway Green-D line", yaxis=list(title="Headway time",range=c(0,2000)))
+
+###Plot Green Line E Headway
+GreenLineEHeadway<-na.omit(GreenLineEHeadway)
+
+GreenLineEHeadwayBoxPlot <- plot_ly(GreenLineEHeadway, y = ~(headway_time_sec), color = ~from_name, type = "box")%>%
+  layout(title="Headway Green-E line", yaxis=list(title="Headway time",range=c(0,2000)))
+
+###Plot Orange Line Headway
+OrangeLineHeadway<-na.omit(OrangeLineHeadway)
+
+OrangeLineHeadwayBoxPlot <- plot_ly(OrangeLineHeadway, y = ~(headway_time_sec), color = ~from_name, type = "box")%>%
+  layout(title="Headway Orange line", yaxis=list(title="Headway time",range=c(0,2000)))
+
+###Plot Blue Line Headway
+BlueLineHeadway<-na.omit(BlueLineHeadway)
+
+BlueLineHeadwayBoxPlot <- plot_ly(BlueLineHeadway, y = ~(headway_time_sec), color = ~from_name, type = "box")%>%
+  layout(title="Headway Blue line", yaxis=list(title="Headway time",range=c(0,2000)))
+```
+
+## Plotting Headway Times as Box Plot {.tabset .tabset-fade}
+
+###Red Line
+<br>
+```{r echo=FALSE, fig.align="center", fig.width= 10}
+RedLineHeadwayBoxPlot
+```
+
+###Green-B
+<br>
+```{r echo=FALSE, fig.align="center", fig.width= 10}
+GreenLineBHeadwayBoxPlot
+```
+
+###Green-C
+<br>
+```{r echo=FALSE, fig.align="center", fig.width= 10}
+GreenLineCHeadwayBoxPlot
+```
+
+###Green-D
+<br>
+```{r echo=FALSE, fig.align="center", fig.width= 10}
+GreenLineDHeadwayBoxPlot
+```
+
+###Green-E
+<br>
+```{r echo=FALSE, fig.align="center", fig.width= 10}
+GreenLineEHeadwayBoxPlot
+```
+
+###Orange
+<br>
+```{r echo=FALSE, fig.align="center", fig.width= 10}
+OrangeLineHeadwayBoxPlot
+```
+
+###Blue
+<br>
+```{r echo=FALSE, fig.align="center", fig.width= 10}
+BlueLineHeadwayBoxPlot
+```
+
+##
+
+###Ploting Headway Heat Map by hour of the day
+```{r}
+RLHours<-strftime(as.POSIXct(as.numeric(RedLineHeadway$current_dep_dt), origin="1970-01-01"), format="%H")
+RedLineHeatMap<-data.frame(RedLineHeadway$from_name, as.numeric(RLHours), as.numeric(RedLineHeadway$headway_time_sec))
+colnames(RedLineHeatMap)<-c("from_name","hours","headway_time_sec")
+RedLineHeatMap1<-subset(RedLineHeatMap, (RedLineHeatMap$hours != 1) & (RedLineHeatMap$hours != 4) & (RedLineHeatMap$hours != 5))
+RedLineHeatMap1[RedLineHeatMap1$hours==0,]$hours <- 24
+
+RLheatmapagg<-aggregate(headway_time_sec ~ ., RedLineHeatMap1,mean)
+RLHlen<-(nrow(RLheatmapagg)/length(unique(RLheatmapagg$from_name)))
+RLheatmapmatrix<-matrix(RLheatmapagg$headway_time_sec,ncol=RLHlen)
+
+RLHeatMapPlot <- plot_ly(
+    x = unique(RLheatmapagg$hours), y = unique(RLheatmapagg$from_name), colorscale = "Greys",
+    z = RLheatmapmatrix, type = "heatmap"
+)%>%
+  layout(title="Red Line Line heat map", margin = list(l=150), yaxis=list(autorange='reversed'))
+
+#Green-B
+GLBHours<-strftime(as.POSIXct(as.numeric(GreenLineBHeadway$current_dep_dt), origin="1970-01-01"), format="%H")
+GreenLineBHeatMap<-data.frame(GreenLineBHeadway$from_name, as.numeric(GLBHours), as.numeric(GreenLineBHeadway$headway_time_sec))
+colnames(GreenLineBHeatMap)<-c("from_name","hours","headway_time_sec")
+GreenLineBHeatMap1<-subset(GreenLineBHeatMap, (GreenLineBHeatMap$hours != 1) & (GreenLineBHeatMap$hours != 4) & (GreenLineBHeatMap$hours != 5))
+GreenLineBHeatMap1[GreenLineBHeatMap1$hours==0,]$hours <- 24
+
+GLBheatmapagg<-aggregate(headway_time_sec ~ ., GreenLineBHeatMap1,mean)
+GLBHlen<-(nrow(GLBheatmapagg)/length(unique(GLBheatmapagg$from_name)))
+GLBheatmapmatrix<-matrix(GLBheatmapagg$headway_time_sec,ncol=GLBHlen)
+GLBHeatMapPlot <- plot_ly(
+    x = unique(GLBheatmapagg$hours), y = unique(GLBheatmapagg$from_name), colorscale = "Greys",
+    z = GLBheatmapmatrix, type = "heatmap"
+)%>%
+  layout(title="Green-B Line heat map", margin = list(l=150), yaxis=list(autorange='reversed'))
+
+#Green-C
+GLCHours<-strftime(as.POSIXct(as.numeric(GreenLineCHeadway$current_dep_dt), origin="1970-01-01"), format="%H")
+GreenLineCHeatMap<-data.frame(GreenLineCHeadway$from_name, as.numeric(GLCHours), as.numeric(GreenLineCHeadway$headway_time_sec))
+colnames(GreenLineCHeatMap)<-c("from_name","hours","headway_time_sec")
+GreenLineCHeatMap1<-subset(GreenLineCHeatMap, (GreenLineCHeatMap$hours != 1) & (GreenLineCHeatMap$hours != 4) & (GreenLineCHeatMap$hours != 5))
+GreenLineCHeatMap1[GreenLineCHeatMap1$hours==0,]$hours <- 24
+
+GLCheatmapagg<-aggregate(headway_time_sec ~ ., GreenLineCHeatMap1,mean)
+GLCHlen<-(nrow(GLCheatmapagg)/length(unique(GLCheatmapagg$from_name)))
+
+GLCheatmapmatrix<-matrix(GLCheatmapagg$headway_time_sec,ncol=GLCHlen)
+GLCHeatMapPlot <- plot_ly(
+    x = unique(GLCheatmapagg$hours), y = unique(GLCheatmapagg$from_name), colorscale = "Greys",
+    z = GLCheatmapmatrix, type = "heatmap"
+)%>%
+  layout(title="Green-C Line heat map", margin = list(l=150), yaxis=list(autorange='reversed'))
+
+#Green-D
+GLDHours<-strftime(as.POSIXct(as.numeric(GreenLineDHeadway$current_dep_dt), origin="1970-01-01"), format="%H")
+GreenLineDHeatMap<-data.frame(GreenLineDHeadway$from_name, as.numeric(GLDHours), as.numeric(GreenLineDHeadway$headway_time_sec))
+colnames(GreenLineDHeatMap)<-c("from_name","hours","headway_time_sec")
+GreenLineDHeatMap1<-subset(GreenLineDHeatMap, (GreenLineDHeatMap$hours != 1) & (GreenLineDHeatMap$hours != 4) & (GreenLineDHeatMap$hours != 5))
+GreenLineDHeatMap1[GreenLineDHeatMap1$hours==0,]$hours <- 24
+
+GLDheatmapagg<-aggregate(headway_time_sec ~ ., GreenLineDHeatMap1,mean)
+GLDHlen<-(nrow(GLDheatmapagg)/length(unique(GLDheatmapagg$from_name)))
+
+GLDheatmapmatrix<-matrix(GLDheatmapagg$headway_time_sec,ncol=GLDHlen)
+GLDHeatMapPlot <- plot_ly(
+    x = unique(GLDheatmapagg$hours), y = unique(GLDheatmapagg$from_name), colorscale = "Greys",
+    z = GLDheatmapmatrix, type = "heatmap"
+)%>%
+  layout(title="Green-D Line heat map", margin = list(l=150), yaxis=list(autorange='reversed'))
+
+#Green-E
+GLEHours<-strftime(as.POSIXct(as.numeric(GreenLineEHeadway$current_dep_dt), origin="1970-01-01"), format="%H")
+GreenLineEHeatMap<-data.frame(GreenLineEHeadway$from_name, as.numeric(GLEHours), as.numeric(GreenLineEHeadway$headway_time_sec))
+colnames(GreenLineEHeatMap)<-c("from_name","hours","headway_time_sec")
+GreenLineEHeatMap1<-subset(GreenLineEHeatMap, (GreenLineEHeatMap$hours != 1) & (GreenLineEHeatMap$hours != 4) & (GreenLineEHeatMap$hours != 5))
+GreenLineEHeatMap1[GreenLineEHeatMap1$hours==0,]$hours <- 24
+
+GLEheatmapagg<-aggregate(headway_time_sec ~ ., GreenLineEHeatMap1,mean)
+GLEHlen<-(nrow(GLEheatmapagg)/length(unique(GLEheatmapagg$from_name)))
+
+GLEheatmapmatrix<-matrix(GLEheatmapagg$headway_time_sec,ncol=GLEHlen)
+GLEHeatMapPlot <- plot_ly(
+    x = unique(GLEheatmapagg$hours), y = unique(GLEheatmapagg$from_name), colorscale = "Greys",
+    z = GLEheatmapmatrix, type = "heatmap"
+)%>%
+  layout(title="Green-E Line heat map", margin = list(l=150), yaxis=list(autorange='reversed'))
+
+#Orange-Line
+OLHours<-strftime(as.POSIXct(as.numeric(OrangeLineHeadway$current_dep_dt), origin="1970-01-01"), format="%H")
+OrangeLineHeatMap<-data.frame(OrangeLineHeadway$from_name, as.numeric(OLHours), as.numeric(OrangeLineHeadway$headway_time_sec))
+colnames(OrangeLineHeatMap)<-c("from_name","hours","headway_time_sec")
+OrangeLineHeatMap1<-subset(OrangeLineHeatMap, (OrangeLineHeatMap$hours != 1) & (OrangeLineHeatMap$hours != 4) & (OrangeLineHeatMap$hours != 5))
+OrangeLineHeatMap1[OrangeLineHeatMap1$hours==0,]$hours <- 24
+
+OLheatmapagg<-aggregate(headway_time_sec ~ ., OrangeLineHeatMap1,mean)
+OLHlen<-(nrow(OLheatmapagg)/length(unique(OLheatmapagg$from_name)))
+OLheatmapmatrix<-matrix(OLheatmapagg$headway_time_sec,ncol=OLHlen)
+OLHeatMapPlot <- plot_ly(
+    x = unique(as.character(OLheatmapagg$hours)), y = unique(OLheatmapagg$from_name), colorscale = "Greys",
+    z = OLheatmapmatrix, type = "heatmap"
+)%>%
+  layout(title="Orange Line heat map", margin = list(l=150), yaxis=list(autorange='reversed'))
+
+#Blue-Line
+BLHours<-strftime(as.POSIXct(as.numeric(BlueLineHeadway$current_dep_dt), origin="1970-01-01"), format="%H")
+BlueLineHeatMap<-data.frame(BlueLineHeadway$from_name, as.numeric(BLHours), as.numeric(BlueLineHeadway$headway_time_sec))
+colnames(BlueLineHeatMap)<-c("from_name","hours","headway_time_sec")
+BlueLineHeatMap1<-subset(BlueLineHeatMap, (BlueLineHeatMap$hours != 1) & (BlueLineHeatMap$hours != 4) & (BlueLineHeatMap$hours != 5))
+BlueLineHeatMap1[BlueLineHeatMap1$hours==0,]$hours <- 24
+
+BLheatmapagg<-aggregate(headway_time_sec ~ ., BlueLineHeatMap1,mean)
+BLHlen<-(nrow(BLheatmapagg)/length(unique(BLheatmapagg$from_name)))
+BLheatmapmatrix<-matrix(BLheatmapagg$headway_time_sec,ncol=BLHlen)
+BLHeatMapPlot <- plot_ly(
+    x = unique(as.character(BLheatmapagg$hours)), y = unique(BLheatmapagg$from_name), colorscale = "Greys",
+    z = BLheatmapmatrix, type = "heatmap"
+)%>%
+  layout(title="Blue Line heat map", margin = list(l=150), yaxis=list(autorange='reversed'))
+
+```
+
+## Plotting Headway times as Heat Map by hour of the day {.tabset .tabset-fade}
+### Red Line
+<br>
+```{r echo=FALSE, fig.align="center", fig.width= 11}
+RLHeatMapPlot
+```
+
+### Green-B Line
+<br>
+```{r echo=FALSE, fig.align="center", fig.width= 11}
+GLBHeatMapPlot
+```
+
+### Green-C Line
+<br>
+```{r echo=FALSE, fig.align="center", fig.width= 11}
+GLCHeatMapPlot
+```
+
+### Green-D Line
+<br>
+```{r echo=FALSE, fig.align="center", fig.width= 11}
+GLDHeatMapPlot
+```
+
+### Green-E Line
+<br>
+```{r echo=FALSE, fig.align="center", fig.width= 11}
+GLEHeatMapPlot
+```
+
+### Orange Line
+<br>
+```{r echo=FALSE, fig.align="center", fig.width= 11}
+OLHeatMapPlot
+```
+
+### Blue Line
+<br>
+```{r echo=FALSE, fig.align="center", fig.width= 11}
+BLHeatMapPlot
+```
+
+##
+##
+###Bar Plot of Red/Green-B/Orange Line Headway Times during hours in a day
+```{r echo=FALSE}
+
+dfH<-data.frame(cbind(RedLineHeadway[,c(2)],strftime(as.POSIXct(as.numeric(RedLineHeadway[,c(11)]), origin="1970-01-01"), format="%H"),RedLineHeadway[,c(13)]),RedLineHeadway[,c(14)])
+colnames(dfH)<-c("stop_name","hour_time","headway_time_sec","benchmark_headway_time_sec")
+dfH$headway_time_sec<-as.double(dfH$headway_time_sec)
+dfH$benchmark_headway_time_sec<-as.double(dfH$benchmark_headway_time_sec)
+
+dfH1<-aggregate(headway_time_sec ~ ., dfH, mean)
+dfH2<-aggregate(headway_time_sec ~ hour_time, dfH1, mean)
+dfH1B<-aggregate(benchmark_headway_time_sec ~ ., dfH[-c(3)], mean)
+dfH2B<-aggregate(benchmark_headway_time_sec ~ hour_time, dfH1, mean)
+
+dfH3<-data.frame(cbind(GreenLineBHeadway[,c(2)],strftime(as.POSIXct(as.numeric(GreenLineBHeadway[,c(11)]), origin="1970-01-01"), format="%H"),GreenLineBHeadway[,c(13)]),GreenLineBHeadway[,c(14)])
+colnames(dfH3)<-c("stop_name","hour_time","headway_time_sec","benchmark_headway_time_sec")
+dfH3$headway_time_sec<-as.double(dfH3$headway_time_sec)
+dfH3$benchmark_headway_time_sec<-as.double(dfH3$benchmark_headway_time_sec)
+
+dfH4<-aggregate(headway_time_sec ~ ., dfH3, mean)
+dfH5<-aggregate(headway_time_sec ~ hour_time, dfH4, mean)
+dfH4B<-aggregate(benchmark_headway_time_sec ~ ., dfH3[-c(3)], mean)
+dfH5B<-aggregate(benchmark_headway_time_sec ~ hour_time, dfH4, mean)
+
+dfH6<-data.frame(cbind(OrangeLineHeadway[,c(2)],strftime(as.POSIXct(as.numeric(OrangeLineHeadway[,c(11)]), origin="1970-01-01"), format="%H"),OrangeLineHeadway[,c(13)]),OrangeLineHeadway[,c(14)])
+colnames(dfH6)<-c("stop_name","hour_time","headway_time_sec","benchmark_headway_time_sec")
+dfH6$headway_time_sec<-as.double(dfH6$headway_time_sec)
+dfH6$benchmark_headway_time_sec<-as.double(dfH6$benchmark_headway_time_sec)
+
+dfH7<-aggregate(headway_time_sec ~ ., dfH6, mean)
+dfH8<-aggregate(headway_time_sec ~ hour_time, dfH7, mean)
+dfH7B<-aggregate(benchmark_headway_time_sec ~ ., dfH6[-c(3)], mean)
+dfH8B<-aggregate(benchmark_headway_time_sec ~ hour_time, dfH7, mean)
+
+dfH2new<-cbind(dfH2,rep("Red",nrow(dfH2)))
+colnames(dfH2new)<-c("hour_time","headway_time_sec","route_name")
+dfH5new<-cbind(dfH5,rep("Green-B",nrow(dfH5)))
+colnames(dfH5new)<-c("hour_time","headway_time_sec","route_name")
+dfH8new<-cbind(dfH8,rep("Orange",nrow(dfH8)))
+colnames(dfH8new)<-c("hour_time","headway_time_sec","route_name")
+dfHF<-rbind(dfH2new,dfH5new,dfH8new)
+dfHF$headway_time_sec<-as.numeric(dfHF$headway_time_sec)
+
+dfH2Bnew<-cbind(dfH2B,rep("Red",nrow(dfH2B)))
+colnames(dfH2Bnew)<-c("hour_time","benchmark_headway_time_sec","route_name")
+dfH5Bnew<-cbind(dfH5B,rep("Green-B",nrow(dfH5B)))
+colnames(dfH5Bnew)<-c("hour_time","benchmark_headway_time_sec","route_name")
+dfH8Bnew<-cbind(dfH8B,rep("Orange",nrow(dfH8B)))
+colnames(dfH8Bnew)<-c("hour_time","benchmark_headway_time_sec","route_name")
+dfHFB<-rbind(dfH2Bnew,dfH5Bnew,dfH8Bnew)
+dfHFB$benchmark_headway_time_sec<-as.numeric(dfHFB$benchmark_headway_time_sec)
+RGOHeadwayPlot<-plot_ly(dfHF, x = ~hour_time, y = ~headway_time_sec, color = ~route_name,type="bar",name="Actual") %>%
+  layout(title="Headway Times of trains during hours in a day",xaxis=list(title="Actual"),yaxis=list(title="Headway time",range=c(0,1200)))
+
+RGOBenchHeadwayPlot<-plot_ly(dfHFB, x = ~hour_time, y = ~benchmark_headway_time_sec, color = ~route_name,type="bar", name="Bench") %>%
+  layout(title="Headway Times of trains during hours in a day",xaxis=(list(title="Benchmark")), yaxis=list(range=c(0,1200)))
+
+```
+
+<br>
+```{r echo=FALSE, fig23, fig.align="center", fig.width= 11}
+#Might have screwed up this plot. Please check.
+subplot(RGOHeadwayPlot,RGOBenchHeadwayPlot)
+```
+
+###Static MBTA Subway Map generated using Leaflet
+PS: Plotly maps doesn't display in the viewer panel of RStudio and has to be exported as html which is why I shifted towards Leaflet.
+```{r}
+MBTAStaticMap <- leaflet() %>% 
+  setView(lng = -71.0589, lat = 42.3601, zoom = 12) %>% 
+  addProviderTiles("CartoDB.Positron") %>%
+  addPolylines(as.numeric(RedLineRoute1$stop_lon),as.numeric(RedLineRoute1$stop_lat),color="red") %>%
+  addCircleMarkers(as.numeric(RedLineRoute1$stop_lon),as.numeric(RedLineRoute1$stop_lat),radius=1,popup = RedLineRoute1$parent_station_name) %>%
+  
+  addPolylines(as.numeric(GreenBLineRoute1$stop_lon),as.numeric(GreenBLineRoute1$stop_lat),color="green") %>%
+  addCircleMarkers(as.numeric(GreenBLineRoute1$stop_lon),as.numeric(GreenBLineRoute1$stop_lat),radius=1,popup = GreenBLineRoute1$parent_station_name) %>%
+  
+  addPolylines(as.numeric(GreenCLineRoute1$stop_lon),as.numeric(GreenCLineRoute1$stop_lat),color="green") %>%
+  addCircleMarkers(as.numeric(GreenCLineRoute1$stop_lon),as.numeric(GreenCLineRoute1$stop_lat),radius=1,popup = GreenCLineRoute1$parent_station_name) %>%
+  
+  addPolylines(as.numeric(GreenDLineRoute1$stop_lon),as.numeric(GreenDLineRoute1$stop_lat),color="green") %>%
+  addCircleMarkers(as.numeric(GreenDLineRoute1$stop_lon),as.numeric(GreenDLineRoute1$stop_lat),radius=1,popup = GreenDLineRoute1$parent_station_name) %>%
+  
+  addPolylines(as.numeric(GreenELineRoute1$stop_lon),as.numeric(GreenELineRoute1$stop_lat),color="green") %>%
+  addCircleMarkers(as.numeric(GreenELineRoute1$stop_lon),as.numeric(GreenELineRoute1$stop_lat),radius=1,popup = GreenELineRoute1$parent_station_name) %>%
+  
+  addPolylines(as.numeric(BlueLineRoute1$stop_lon),as.numeric(BlueLineRoute1$stop_lat),color="blue") %>%
+  addCircleMarkers(as.numeric(BlueLineRoute1$stop_lon),as.numeric(BlueLineRoute1$stop_lat),radius=1,popup = BlueLineRoute1$parent_station_name) %>%
+  
+  addPolylines(as.numeric(OrangeLineRoute1$stop_lon),as.numeric(OrangeLineRoute1$stop_lat),color="orange") %>%
+  addCircleMarkers(as.numeric(OrangeLineRoute1$stop_lon),as.numeric(OrangeLineRoute1$stop_lat),radius=1,popup = OrangeLineRoute1$parent_station_name) %>%
+  
+  addPolylines(as.numeric(MattapanLineRoute1$stop_lon),as.numeric(MattapanLineRoute1$stop_lat),color="red") %>%
+  addCircleMarkers(as.numeric(MattapanLineRoute1$stop_lon),as.numeric(MattapanLineRoute1$stop_lat),radius=1,popup = MattapanLineRoute1$parent_station_name)
+```
+<br>
+```{r echo=FALSE, fig19, fig.align="center", fig.width= 9}
+MBTAStaticMap
+```
+
+###MBTA Subway realtime map build using shiny
+<iframe width="920" height="940" src="https://amalrk.shinyapps.io/mbta/" frameborder="0" allowfullscreen></iframe>
+
+###Conclusion and Future work
+1. The Green Line B Branch travel times follows a skewed right distribution and the Allston St -> BU East follows a Gaussian distribution. This should ideally mean that the distances between each pair of adjacent Green Line B branch stops should also follow a skewed Gaussian distribution.
+2. Central Limit Theorem was tested at sample sizes of 5,10,15 & 20 on Allston St -> BU East travel times. The obtained graphs showed that as the sample size increases, the standard deviation of the means decreases for the Gaussian distribution in line with our existing knowledge.
+3. Simple random sampling (SRSWR and SWRSWOR) and systematic sampling techniques were tested on the Allston St -> BU East travel times data.
+4. Mean and Confidence Interval of 80% and 90% estimated over sample sizes 10, 50 and 75 on Allston St -> BU East travel times.
+5. Travel Times (time taken by a train to travel from one stop to the nearby stop):
+      a. In Red line, significant travel time delay was observed at North Quincy station.
+      b. Green Line B and Orange line travel times are much smaller than that of Red line.
+      c. In Red line, Northbound Brainree and Northquincy pair takes significantly larger time for travel.
+      d. In Red line, Southbound trains have been much more consistent.
+      e. In Green line, Westbound Science park experiences significant travel times.
+      f. In Orange line, it's Wellington for Northbound trains and Malden Center for Southbound trains.
+6. Dwell Times:
+      a. Possibility of data inconsistency.
+      b. Green line B has significantly lower dwell time (time train waiting in a station) over the months than Red and Orange lines.
+7. Headway Times (interval at which train comes to a station):
+      a. In the Red line, the average train departure difference is higher in Braintree and lowest at Kendall/MIT, Park Street, Charles/MGH etc.
+      b. Green Line B headway is much more uniform actross the stations. The trains travel much faster around Arlington, Boylston, Copley etc and travel times increase as they move above ground due to the traffic.
+      c. In the Orange line, Oak Groove has the highest headway and the distribution is more uniform than Red line.
+      d. Waiting times at any station is less during early morning and around 2-5 pm. All the lines Red/Green-B and Orange line perform lower than the expected benchmark set by the MBTA.
+      e. Waiting times for Green line is usually higher in comparison to Red and Orange lines.
+      f. Heat maps with time of the day on x-axis were ploted which showed that waiting times end stops are relatively higher. Also, from the Orange line Heat map it can be evidently seen that the waiting times for trains are higher during 11am-1pm and 7pm-11pm.
+8. MBTA Subway line map generated using leaflet.
+9. Real-time MBTA app was developed which shows the realtime positions of the trains in all the subway lines. It also shows prediciton of train clustering in red circular markers. The intensity of the cluster is denoted by the radius of the red cicular marker. The radius is determined using an alogrithm which uses parameters such as distance between the trains, number of active trains in a line, total distance of the subway line etc.
+10. Future work involves incorporating velocity of each train as they become available with the data provided by the MBTA.
+11. Another future work can be done by developing Marey Diagram in R for train schedule. https://mbtaviz.github.io/. It can be very effective for MBTA to generate weekly reports.
+
+
+```{r echo=FALSE}
+# VehiclesComplete<-data.frame(fromJSON(paste(TVehiclesURL3))$data)
+# 
+# ShapesComplete <- data.frame(Date=as.Date(character()),
+#                              File=character(), 
+#                              User=character(), 
+#                              stringsAsFactors=FALSE) 
+# 
+# PredictionsComplete <- data.frame(Date=as.Date(character()),
+#                              File=character(), 
+#                              User=character(), 
+#                              stringsAsFactors=FALSE) 
+# 
+# for(i in RoutesList) {
+#   ShapesComplete<-rbind(ShapesComplete, data.frame(fromJSON(paste(TShapesURL3,i,sep=""), flatten = TRUE)))
+#   PredictionsComplete<-rbind(PredictionsComplete, data.frame(fromJSON(paste(TPredictionsURL3,i,sep=""), flatten = TRUE)))
+# }
+```
+
+
+```{r echo=FALSE}
+#Pushing the MBTA shiny app
+
+#library(rsconnect)
+
+#setAccountInfo(name='amalrkrishna', token='A1A228E84A2007396F51335888F3A4E2', secret='W9jl7xAbII8PkMxvh1Q5ZKy83z6dREnnIlRTpl5o')
+#deployApp('/home/amal/Downloads/Acad/Project/shinyMBTA')
+#removeAccount("amalrkrishna")
+
+#setAccountInfo(name='amalrk', token='D23A044078AEC7165A21ECF05FB49FFB', secret='dar8cvjSCKiNm4E9F9IJqFsLdJ6R9D1HFxq6ELZe')
+#deployApp('/home/amal/Downloads/Acad/Project/mbta')
+
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated some of the plots.
+
+<style>
+  .col2 {
+    columns: 2 200px;         /* number of columns and width in pixels*/
+    -webkit-columns: 2 200px; /* chrome, safari */
+    -moz-columns: 2 200px;    /* firefox */
+  }
+  .col3 {
+    columns: 3 100px;
+    -webkit-columns: 3 100px;
+    -moz-columns: 3 100px;
+  }
+</style>
